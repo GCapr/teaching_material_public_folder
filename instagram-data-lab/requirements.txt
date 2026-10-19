@@ -1,0 +1,7 @@
+# Build-time dependencies for the JupyterLite site (installed by the GitHub Action,
+# or locally with `pip install -r requirements.txt`). None of this runs in the
+# students' browsers; the browser downloads the built static site plus Pyodide.
+jupyterlite-core==0.8.0
+jupyterlab~=4.6.0
+notebook~=7.6.0
+jupyterlite-pyodide-kernel==0.8.0

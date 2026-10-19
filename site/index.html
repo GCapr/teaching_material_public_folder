@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Teaching material — G. Caprini</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --accent:#2563eb; --line:#e5e7eb; --panel:#f8fafc; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --accent:#93c5fd; --line:#374151; --panel:#111827; }
+    body { background:#0b1021; }
+  }
+  body { margin:0; padding:0 16px; color:var(--ink); font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; line-height:1.5; }
+  main { max-width: 720px; margin: 48px auto 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 32px; }
+  h2 { font-size: 1.05rem; margin: 32px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .card { border:1px solid var(--line); background:var(--panel); border-radius:10px; padding:16px 18px; margin: 10px 0; }
+  .card a.title { font-size: 1.1rem; font-weight: 600; color: var(--accent); text-decoration: none; }
+  .card a.title:hover { text-decoration: underline; }
+  .card p { margin: 6px 0 0; color: var(--muted); }
+  code { font-size: .9em; }
+  footer { margin-top: 48px; color: var(--muted); font-size: .9rem; }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Teaching material</h1>
+  <p class="sub">Browser-only labs: everything runs on your own computer, nothing is uploaded.</p>
+
+  <h2>ECOSM 2026 — Economics of social media and digital platforms</h2>
+  <div class="card">
+    <a class="title" href="instagram-data-lab/lab/index.html?path=01_scan_for_personal_data.ipynb">Instagram data lab — scan your export for personal data</a>
+    <p>A Jupyter notebook that runs Python inside your browser. Drag in the <code>.zip</code> you downloaded from Instagram and find out which personal data it contains — yours and other people's — before anything is analysed or shared.</p>
+  </div>
+
+  <h2>ECOSM 2025 — Sciences Po</h2>
+  <div class="card">
+    <a class="title" href="youtube_topics_lab.html">YouTube topics &amp; concentration — interactive notebook</a>
+    <p>Browser-only Python notebook from the 2025 edition.</p>
+  </div>
+
+  <footer>Source: <a href="https://github.com/GCapr/teaching_material_public_folder">github.com/GCapr/teaching_material_public_folder</a></footer>
+</main>
+</body>
+</html>

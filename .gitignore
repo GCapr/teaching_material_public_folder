@@ -1,0 +1,14 @@
+# JupyterLite build artefacts
+_output/
+dist/
+.jupyterlite.doit.db
+
+# Python / Jupyter
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+
+# Never commit anyone's data export (instagram-<username>-<date>-<id>) or scan report
+instagram-*-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*
+report/
+report.zip
