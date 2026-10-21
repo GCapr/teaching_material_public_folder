@@ -84,7 +84,14 @@ TEXT_POLICY_HELP = {
 
 # File types (from ig_pii_scan.FILE_RULES) that are removed entirely.
 DROP_TYPES = {"address_book", "security_log", "device_info", "location", "contact_details",
-              "off_platform_activity", "settings", "media_file"}
+              "off_platform_activity", "settings", "media_file", "payment_details", "search_history"}
+# files whose entries are content you consumed: an author outside your network is a public account
+CONSUMED_RE = re.compile(r"posts_viewed|videos_watched|threads_viewed|ads_viewed|ads_clicked|liked_posts|"
+                         r"saved_posts|story_likes|stories_viewed|liked_comments")
+# titles of nested blocks that describe a place, not a person
+PLACE_TITLES = {"place", "location", "luogo", "ort", "lieu", "lugar"}
+HASHTAG_TITLES = {"hashtags", "hashtag", "mentions", "topics", "topic"}
+DROP_KEYS = {"fbid"}
 # Keys whose values are a path to a media file inside the export (the files are dropped,
 # so the paths are replaced by a flag).
 MEDIA_KEYS = {"uri", "media_uri", "thumbnail_uri", "photo_uri", "video_uri"}
@@ -317,6 +324,311 @@ def domain_of(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tidy tables (works on the anonymised JSON tree; both export layouts)
+# ---------------------------------------------------------------------------
+
+TABLES = ("messages", "threads", "followers", "following", "follow_requests", "posts", "comments", "likes",
+          "saved", "stories", "reels", "ads_viewed", "posts_viewed", "videos_watched", "threads_viewed",
+          "stories_viewed", "story_likes", "suggested_accounts", "advertisers", "off_meta_activity", "topics",
+          "insights_posts", "insights_stories", "insights_summary")
+PSEUDO_RE = re.compile(r"me|user_\w+")
+
+
+def _iso_utc(value, unit: str = "s") -> str:
+    try:
+        v = float(value)
+        if unit == "s" and v > 1e11:
+            unit = "ms"
+        return datetime.fromtimestamp(v / (1000 if unit == "ms" else 1), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def lv_fields(item: dict) -> dict:
+    """Flatten a label_values item: {field name: value}. Nested blocks come back as lists of dicts."""
+    out: dict = {}
+    for e in item.get("label_values") or []:
+        if not isinstance(e, dict):
+            continue
+        name = e.get("label") if isinstance(e.get("label"), str) else e.get("title") if "dict" in e else None
+        if name is None:
+            continue
+        if "value" in e:
+            out[name] = e["value"]
+            if e.get("href"):
+                out[name + " (href)"] = e["href"]
+        elif "timestamp_value" in e:
+            out[name] = e["timestamp_value"]
+        elif "vec" in e:
+            out[name] = [x.get("value") if isinstance(x, dict) else x for x in e["vec"]]
+        elif "dict" in e:
+            blocks = []
+            for sub in e["dict"]:
+                if isinstance(sub, dict):
+                    b = lv_fields({"label_values": sub.get("dict", [])})
+                    if sub.get("title"):
+                        b["_title"] = sub["title"]
+                    blocks.append(b)
+            out[name] = blocks
+        else:
+            out.setdefault(name, None)
+    return out
+
+
+def _cat_of(label: str):
+    hit = S._match_key_rules(S._norm_key(label.split(" (href)")[0]))
+    return hit[0] if hit else None
+
+
+def _by_cat(fields: dict, *cats):
+    """First field whose name classifies as one of the categories (localised labels welcome)."""
+    for k, v in fields.items():
+        if _cat_of(k) in cats:
+            return v
+    return None
+
+
+def lv_owner(fields: dict) -> dict:
+    """The account block ("Owner"/"Author"/...) of an item: {name, username, url}."""
+    for k, v in fields.items():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            sub = v[0]
+            u = _by_cat(sub, "username")
+            if isinstance(u, str) and u:
+                n = _by_cat(sub, "person_name")
+                url = _by_cat(sub, "url")
+                return {"username": u, "name": n if isinstance(n, str) else "", "url": url if isinstance(url, str) else ""}
+    for k, v in fields.items():  # {"label": "Author", "vec": [{"value": name}]} or a plain value
+        if _cat_of(k) in ("username", "person_name", "business_or_app"):
+            if isinstance(v, list) and v and isinstance(v[0], str):
+                return {"username": v[0], "name": "", "url": ""}
+            if isinstance(v, str) and v:
+                return {"username": v, "name": "", "url": ""}
+    return {"username": "", "name": "", "url": ""}
+
+
+def lv_hashtags(fields: dict) -> list:
+    for k, v in fields.items():
+        if S._norm_key(k) in ("hashtags", "hashtag") and isinstance(v, list):
+            return [x.get("Name") or x.get("name") or "" for x in v if isinstance(x, dict)]
+    return []
+
+
+def _smd(item: dict) -> dict:
+    return item.get("string_map_data") or {}
+
+
+def _smd_by_cat(item: dict, *cats) -> str:
+    for k, v in _smd(item).items():
+        if _cat_of(k) in cats and isinstance(v, dict):
+            return v.get("value", "") if isinstance(v.get("value"), str) else ""
+    return ""
+
+
+def _old_when(item: dict):
+    lst = item.get("string_list_data") or []
+    if lst and isinstance(lst[0], dict) and lst[0].get("timestamp"):
+        return lst[0]["timestamp"]
+    for v in _smd(item).values():
+        if isinstance(v, dict) and v.get("timestamp"):
+            return v["timestamp"]
+    return None
+
+
+def _items_of(d):
+    if isinstance(d, list):
+        return [x for x in d if isinstance(x, dict)]
+    if isinstance(d, dict):
+        if "label_values" in d:
+            return [d]
+        return [x for x in next((v for v in d.values() if isinstance(v, list)), []) if isinstance(x, dict)]
+    return []
+
+
+def _n_words(t) -> int:
+    return len(WORD_RE.findall(t)) if isinstance(t, str) else 0
+
+
+def harvest_file(data: Any, rel: str, rows: dict, iso=_iso_utc) -> None:
+    """Append rows to `rows` (table name -> list of dicts) from one anonymised JSON file."""
+    low = rel.lower()
+    name = PurePosixPath(low).name
+    for t in TABLES:
+        rows.setdefault(t, [])
+    items = _items_of(data)
+    new_layout = bool(items) and "label_values" in items[0]
+
+    def consumed(table, kind=None):
+        for it in items:
+            if new_layout:
+                f = lv_fields(it)
+                o = lv_owner(f)
+                cap = _by_cat(f, "free_text")
+                cap = cap if isinstance(cap, str) else ""
+                row = {"author": o["username"], "author_name": o["name"],
+                       "in_network": bool(PSEUDO_RE.fullmatch(o["username"] or "")),
+                       "timestamp": iso(it.get("timestamp")), "n_words_caption": _n_words(cap),
+                       "hashtags": " ".join(lv_hashtags(f))}
+            else:
+                o = _smd_by_cat(it, "username", "person_name", "business_or_app") or it.get("title", "")
+                row = {"author": o, "author_name": "", "in_network": bool(PSEUDO_RE.fullmatch(o or "")),
+                       "timestamp": iso(_old_when(it)), "n_words_caption": 0, "hashtags": ""}
+            if kind:
+                row["kind"] = kind
+            rows[table].append(row)
+
+    if name.startswith("followers"):
+        for it in items:
+            sl = (it.get("string_list_data") or [{}])[0]
+            rows["followers"].append({"user": sl.get("value", ""), "timestamp": iso(sl.get("timestamp"))})
+    elif name.startswith("following") and "hashtag" not in name:
+        for it in items:
+            sl = (it.get("string_list_data") or [{}])[0]
+            rows["following"].append({"user": sl.get("value") or it.get("title", ""), "timestamp": iso(sl.get("timestamp"))})
+    elif "follow_requests" in name or "pending_follow" in name:
+        for it in items:
+            if new_layout:
+                u = _by_cat(lv_fields(it), "username")
+            else:
+                u = (it.get("string_list_data") or [{}])[0].get("value", "")
+            rows["follow_requests"].append({"user": u if isinstance(u, str) else "",
+                                            "direction": "received" if "received" in name else "sent",
+                                            "timestamp": iso(it.get("timestamp") or _old_when(it))})
+    elif "comments" in name:
+        for it in items:
+            text = _smd_by_cat(it, "free_text")
+            owner = _smd_by_cat(it, "username", "person_name")
+            rows["comments"].append({"on_post_by": owner, "timestamp": iso(_old_when(it)), "n_words": _n_words(text),
+                                     "kind": "reel" if "reel" in name else "post", "text": text})
+    elif "liked_posts" in name or "liked_comments" in name:
+        consumed("likes", "comment" if "comment" in name else "post")
+    elif "saved_posts" in name or (name.startswith("saved") and "collection" not in name):
+        consumed("saved")
+    elif "story_likes" in name:
+        consumed("story_likes")
+    elif "stories_viewed" in name:
+        consumed("stories_viewed")
+    elif "posts_viewed" in name:
+        consumed("posts_viewed")
+    elif "videos_watched" in name:
+        consumed("videos_watched")
+    elif "threads_viewed" in name:
+        consumed("threads_viewed")
+    elif name.startswith("ads_viewed") or name.startswith("ads_clicked"):
+        consumed("ads_viewed", "clicked" if "clicked" in name else "viewed")
+    elif "suggested_accounts" in name:
+        consumed("suggested_accounts")
+    elif "advertisers_using" in name:
+        for it in items:
+            if new_layout:
+                for lab, v in lv_fields(it).items():
+                    if not isinstance(v, list):
+                        continue
+                    l = lab.lower()
+                    how = ("tracked_you_on_their_site_or_app" if "interact" in l or "website" in l
+                           else "uploaded_your_contact_details" if "upload" in l
+                           else "store_visited" if "store" in l else lab)
+                    for adv in v:
+                        if isinstance(adv, str) and adv:
+                            rows["advertisers"].append({"advertiser": adv, "how": how})
+            else:
+                rows["advertisers"].append({"advertiser": it.get("advertiser_name", ""),
+                                            "how": "uploaded_your_contact_details" if it.get("has_data_file_custom_audience")
+                                            else "tracked_you_on_their_site_or_app" if it.get("has_remarketing_custom_audience")
+                                            else "store_visited" if it.get("has_in_person_store_visit") else "unknown"})
+    elif ("off_meta" in low or "off_of_instagram" in low) and "settings" not in name:
+        for it in items:
+            app = it.get("name", "")
+            for ev in it.get("events") or []:
+                if isinstance(ev, dict):
+                    rows["off_meta_activity"].append({"app_or_site": app, "event": ev.get("type", ""),
+                                                      "timestamp": iso(ev.get("timestamp"))})
+    elif any(x in name for x in ("your_topics", "ads_interests", "recommended_topics", "see_less_topics")):
+        src = name.replace(".json", "")
+        for it in items:
+            if new_layout:
+                for lab, v in lv_fields(it).items():
+                    if isinstance(v, list):
+                        for x in v:
+                            t = (x.get("Name") or x.get("name") or x.get("Topic")) if isinstance(x, dict) else x
+                            if isinstance(t, str) and t:
+                                rows["topics"].append({"topic": t, "source": src})
+            else:
+                for v in _smd(it).values():
+                    if isinstance(v, dict) and isinstance(v.get("value"), str) and v["value"]:
+                        rows["topics"].append({"topic": v["value"], "source": src})
+    elif "insights" in low:
+        for it in items:
+            sm = _smd(it)
+            vals = {S._norm_key(k): (v.get("value") if isinstance(v, dict) else v) for k, v in sm.items()}
+            ts = next((v.get("timestamp") for v in sm.values() if isinstance(v, dict) and v.get("timestamp")), None)
+            thumb = (it.get("media_map_data") or {}).get("Media Thumbnail") or {}
+            row = {"timestamp": iso(ts or thumb.get("creation_timestamp")), **vals}
+            if name.startswith("posts"):
+                rows["insights_posts"].append(row)
+            elif name.startswith("stories"):
+                rows["insights_stories"].append(row)
+            else:
+                rows["insights_summary"].append({"metric_set": name.replace(".json", ""), **row})
+    elif (name.startswith("posts") and "viewed" not in name) or "archived_posts" in name or "recently_deleted" in name:
+        if new_layout:
+            return  # media/posts.json (new layout) duplicates posts_1.json, which carries the captions
+        for it in items:
+            media = it.get("media") or []
+            m0 = media[0] if media and isinstance(media[0], dict) else {}
+            cap = it.get("title") or m0.get("title", "") or ""
+            rows["posts"].append({"timestamp": iso(it.get("creation_timestamp") or m0.get("creation_timestamp")),
+                                  "n_media": len(media), "hashtags": " ".join(HASHTAG_RE.findall(cap)),
+                                  "n_mentions": len(S.MENTION_RE.findall(cap)), "n_words": _n_words(cap), "caption": cap,
+                                  "source": "archived" if "archived" in name else "deleted" if "deleted" in name else "posts"})
+    elif name.startswith("stories") and "insights" not in low:
+        for it in items:
+            rows["stories"].append({"timestamp": iso(it.get("creation_timestamp")), "has_caption": bool(it.get("title"))})
+    elif name.startswith("reels") and "comments" not in name:
+        for it in items:
+            media = it.get("media") or []
+            m0 = media[0] if media and isinstance(media[0], dict) else {}
+            rows["reels"].append({"timestamp": iso(it.get("creation_timestamp") or m0.get("creation_timestamp")),
+                                  "caption": it.get("title") or m0.get("title", "") or ""})
+
+
+def write_tables(rows: dict, out_dir) -> dict:
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    written = {}
+    for t, rs in rows.items():
+        if not rs:
+            continue
+        cols: list = []
+        for r in rs:
+            for c in r:
+                if c not in cols:
+                    cols.append(c)
+        with open(out / f"{t}.csv", "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rs)
+        written[t] = len(rs)
+    return written
+
+
+def tables_from_json(json_dir, out_dir) -> dict:
+    """Re-derive the CSV tables (except messages/threads) from an anonymised json/ tree."""
+    rows: dict = {}
+    base = Path(json_dir)
+    for f in sorted(base.rglob("*.json")):
+        rel = f.relative_to(base).as_posix()
+        if "/messages/" in rel or "/inbox/" in rel or "message_requests" in rel:
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        harvest_file(data, rel, rows)
+    return write_tables(rows, out_dir)
+
+
+# ---------------------------------------------------------------------------
 # The result object
 # ---------------------------------------------------------------------------
 
@@ -336,7 +648,7 @@ class Anonymised:
     rescan: Optional[Any] = None                         # ig_pii_scan.Report of the output
     warnings: list = field(default_factory=list)
     unclassified: list = field(default_factory=list)     # kept files the scanner did not recognise
-    public_accounts: set = field(default_factory=set)    # authors kept visible on purpose (not in your network)
+    kept_visible: set = field(default_factory=set)       # names kept visible on purpose: public accounts, businesses, topics
 
     def report(self) -> str:
         L = [f"Anonymisation report  -  {S._display_path(Path(self.source).name)}", "=" * 78,
@@ -361,8 +673,9 @@ class Anonymised:
             L += ["", "PLATFORM DATA KEPT (business, app and topic names stay visible - review before sharing)"]
             for key, label in (("advertisers", "advertisers that hold your data"),
                                ("off_meta_activity", "events reported to Meta by apps/sites"),
-                               ("topics", "inferred interests"), ("ads_viewed", "ads seen"),
+                               ("topics", "inferred interests / topic settings"), ("ads_viewed", "ads seen"),
                                ("posts_viewed", "posts seen"), ("videos_watched", "videos watched"),
+                               ("threads_viewed", "Threads posts seen"),
                                ("suggested_accounts", "accounts suggested to you (pseudonymised)")):
                 n = self.tables.get(key)
                 if n:
@@ -385,12 +698,12 @@ class Anonymised:
             if others:
                 L.append("  other findings: " + ", ".join(f"{c['category']} {c['occurrences']}" for c in others))
             names = {p.value for p in self.rescan.people.values()
-                     if not re.fullmatch(r"(me|user_\w+|group_\w+)", p.value) and p.value.lower() not in self.public_accounts}
+                     if not re.fullmatch(r"(me|user_\w+|group_\w+)", p.value) and p.value.lower() not in self.kept_visible}
             L.append(f"  non-pseudonym names still present: {len(names)}"
                      + (f"  e.g. {[S.mask(n) for n in sorted(names)[:5]]} (masked; see pii_people.csv of a scan of the output)"
                         if names else "")
-                     + (f"   (not counting {len(self.public_accounts)} public accounts kept on purpose)"
-                        if self.public_accounts else ""))
+                     + (f"   (not counting {len(self.kept_visible)} public accounts / businesses kept on purpose)"
+                        if self.kept_visible else ""))
         return "\n".join(L)
 
 
@@ -411,10 +724,7 @@ class _Anonymiser:
             self.res.warnings.append("No followers/following/DM files in this export, so it is impossible to tell "
                                      "which accounts in 'posts viewed' / 'videos watched' are public: all of them "
                                      "were pseudonymised.")
-        self.rows: dict = {k: [] for k in ("messages", "threads", "followers", "following", "posts", "comments",
-                                           "likes", "saved", "stories", "reels", "ads_viewed", "posts_viewed",
-                                           "videos_watched", "suggested_accounts", "advertisers",
-                                           "off_meta_activity", "topics")}
+        self.rows: dict = {k: [] for k in TABLES}
         self.root_in = self._root_name()
         self.root_out = "instagram-anonymised"
 
@@ -474,28 +784,86 @@ class _Anonymiser:
         return t
 
     # -- generic JSON walk ---------------------------------------------------
-    def walk(self, node: Any, rel: str, path: tuple = (), label: Optional[str] = None) -> Any:
+    def walk(self, node: Any, rel: str, path: tuple = (), label: Optional[str] = None, block: str = "") -> Any:
         if isinstance(node, dict):
-            if isinstance(node.get("label"), str):
+            names = S._field_name_keys(node)
+            if "label" in names:
                 label = node["label"]
+            elif "title" in names and node["title"].strip():
+                label = node["title"]
+                block = node["title"].strip().lower()    # "Owner", "Place", "Hashtags", ...
+            ab = self.author_block(node, rel, label)
+            if ab is not None:
+                return ab
             out = {}
             for k, v in node.items():
                 lk = str(k).lower()
-                if lk in EXIF_DROP:
-                    self.counts["metadata fields removed (location/device)"] += 1
+                if lk in EXIF_DROP or lk in DROP_KEYS:
+                    self.counts["metadata fields removed (location/device/identifier)"] += 1
+                    continue
+                if k in names:
+                    out[k] = v                      # a field name, never data
                     continue
                 if isinstance(v, (dict, list)):
-                    out[k] = self.walk(v, rel, path + (k,), label)
+                    out[k] = self.walk(v, rel, path + (k,), label, block)
                     continue
-                out[k] = self.scalar(k, v, rel, path, label)
+                out[k] = self.scalar(k, v, rel, path, label, block)
             return out
         if isinstance(node, list):
-            return [self.walk(v, rel, path + (i,), label) for i, v in enumerate(node)]
+            return [self.walk(v, rel, path + (i,), label, block) for i, v in enumerate(node)]
         return node
 
-    def scalar(self, k: str, v: Any, rel: str, path: tuple, label: Optional[str]) -> Any:
+    def author_block(self, node: dict, rel: str, label: Optional[str]) -> Optional[dict]:
+        """{"dict": [{"label": "URL"...}, {"label": "Name"...}, {"label": "Username"...}], "title": ""}
+        describes one account; treat its three fields as a unit so that name, handle and link
+        get the same treatment (kept visible for a public account, one pseudonym otherwise)."""
+        entries = node.get("dict")
+        if not isinstance(entries, list) or not entries or not all(isinstance(e, dict) and "label" in e for e in entries):
+            return None
+        labels = {S._norm_key(e.get("label", "")): i for i, e in enumerate(entries)}
+        ukey = next((l for l in labels if S._match_key_rules(l) and S._match_key_rules(l)[0] == "username"), None)
+        if ukey is None:
+            return None
+        if (label or "").strip().lower() in PLACE_TITLES:
+            return None
+        username = S._fix(entries[labels[ukey]].get("value") or "")
+        public = bool(username) and self.network_known and bool(CONSUMED_RE.search(rel.lower())) \
+            and not self.P.in_network(username)
+        pseud = self.P(username) if username and not public else None
+        out = []
+        for e in entries:
+            cat = S._match_key_rules(S._norm_key(e.get("label", "")))
+            cat = cat[0] if cat else None
+            ee = dict(e)
+            if cat in ("username", "person_name"):
+                if public:
+                    self.res.kept_visible.add(S._fix(e.get("value") or "").strip().lower())
+                else:
+                    ee["value"] = pseud if e.get("value") else e.get("value")
+                for hk in ("href",):
+                    if hk in ee and ee[hk]:
+                        ee[hk] = ee[hk] if public else "https://www.instagram.com/" + pseud
+            elif cat == "url" or str(e.get("value", "")).lower().startswith("http"):
+                if not public:
+                    for hk in ("value", "href"):
+                        if ee.get(hk):
+                            ee[hk] = "https://www.instagram.com/" + pseud if S.IG_PROFILE_RE.search(ee[hk]) else self.link(ee[hk], rel)
+            else:
+                ee = self.walk(e, rel, (), label, "owner")
+            out.append(ee)
+        if public:
+            self.counts["public accounts kept visible (content you consumed)"] += 1
+        elif username:
+            self.counts["accounts pseudonymised (content you consumed)" if CONSUMED_RE.search(rel.lower())
+                        else "accounts pseudonymised"] += 1
+        res = dict(node)
+        res["dict"] = out
+        return res
+
+    def scalar(self, k: str, v: Any, rel: str, path: tuple, label: Optional[str], block: str = "") -> Any:
         lk = str(k).lower()
-        if lk in ("timestamp", "creation_timestamp", "taken_at", "time", "imported_time") and isinstance(v, (int, float)):
+        if lk in ("timestamp", "creation_timestamp", "taken_at", "time", "imported_time", "timestamp_value") \
+                and isinstance(v, (int, float)):
             return self.ts(v)
         if lk.endswith("_ms") and isinstance(v, (int, float)):
             return self.ts(v, "ms")
@@ -505,46 +873,54 @@ class _Anonymiser:
         if lk in MEDIA_KEYS or (lk == "href" and not sv.lower().startswith(("http://", "https://"))):
             self.counts["media references replaced"] += 1
             return "<media removed>" if sv else sv
-        if lk == "href":
-            return self.link(sv)
+        if lk == "href" or sv.lower().startswith(("http://", "https://")):
+            return self.link(sv, rel)
         # which semantic key labels this value? (same logic as the scanner, including the
         # per-file overrides: "value" in a followers file is a username, "title" in likes too)
         ctx = [p for p in path if isinstance(p, str)] + [k]
-        if label and lk == "value":
+        if label and lk in ("value", "timestamp_value"):
             ctx.append(label)
         cat, _sev, sem = S._classify_key(ctx, k, rel.lower())
         nsem = S._norm_key(sem)
         if lk == "thread_path" or nsem == "thread path":
             return self.out_rel(sv)
         low = rel.lower()
+        if block in PLACE_TITLES:
+            cat = "location_text"          # a place's name/description, not a person
+        elif block in HASHTAG_TITLES and cat in ("person_name", "username", None):
+            cat = "free_text"              # "#brunch" is a word; a name inside it is caught by the name pass
         if cat in ("username", "person_name", "profile_history"):
-            if cat == "username" and ("posts_viewed" in low or "videos_watched" in low):
-                # content you saw: a private account's posts are only visible to followers, so an
+            if cat == "username" and CONSUMED_RE.search(low):
+                # content you consumed: a private account's posts are only visible to followers, so an
                 # author outside your network is a public account and may stay visible
                 if self.network_known and not self.P.in_network(sv):
-                    self.counts["public accounts kept visible (posts/videos viewed)"] += 1
-                    self.res.public_accounts.add(sv.strip().lower())
+                    self.counts["public accounts kept visible (content you consumed)"] += 1
+                    self.res.kept_visible.add(sv.strip().lower())
                     return sv
-                self.counts["network accounts pseudonymised (posts/videos viewed)"] += 1
+                self.counts["accounts pseudonymised (content you consumed)"] += 1
             return self.P(sv)
         if cat in ("business_or_app", "topic"):
             self.counts[f"{'business/app' if cat == 'business_or_app' else 'topic'} names kept"] += 1
+            self.res.kept_visible.add(sv.strip().lower())
             return redact_patterns(sv, self.counts)
         if cat in ("email", "phone", "ip_address", "geo_coordinates", "date_of_birth", "contact_details",
-                   "device_or_session", "location_text", "browsing_history", "gender"):
+                   "device_or_session", "location_text", "browsing_history", "gender", "identifier"):
             self.counts[f"fields removed ({cat})"] += 1
             return "[removed]"
-        if cat == "url" or sv.lower().startswith(("http://", "https://")):
-            return self.link(sv)
+        if cat == "url":
+            return self.link(sv, rel)
         # everything else (captions, comments, and any string under a key we do not know) goes
         # through the full pass: pseudonyms for mentions/links/known names, pattern redaction, links
         return self.free_text(sv)
 
-    def link(self, url: str) -> str:
+    def link(self, url: str, rel: str = "") -> str:
         m = S.IG_PROFILE_RE.search(url)
         if m:
             u = S._ig_user(m)
             if u:
+                if rel and CONSUMED_RE.search(rel.lower()) and self.network_known and not self.P.in_network(u):
+                    self.res.kept_visible.add(u.strip().lower())
+                    return "https://www.instagram.com/" + u
                 self.counts["profile links pseudonymised"] += 1
                 return "https://www.instagram.com/" + self.P(u)
             self.counts["instagram post links reduced"] += 1
@@ -629,130 +1005,8 @@ class _Anonymiser:
 
     # -- content tables ------------------------------------------------------------
     def harvest_rows(self, data: Any, fi: S.FileInfo) -> None:
-        """Fill the tidy tables from the anonymised JSON of a content file.
-
-        Field labels are localised in real exports ("Comment" / "Commento" / "Kommentar"), so
-        entries of string_map_data are looked up by the scanner's category, not by English label.
-        """
-        low = fi.rel_lower
-        name = PurePosixPath(low).name
-
-        def entries(d: dict) -> list:
-            m = d.get("string_map_data") or {}
-            return [(S._classify_key([k], k, low)[0], v) for k, v in m.items() if isinstance(v, dict)]
-
-        def by_cat(d: dict, *cats):
-            for cat, v in entries(d):
-                if cat in cats:
-                    return v
-            return {}
-
-        def when(d: dict):
-            """First timestamp found: string_list_data[0].timestamp or any string_map_data entry's."""
-            lst = d.get("string_list_data") or []
-            if lst and isinstance(lst[0], dict) and lst[0].get("timestamp"):
-                return lst[0]["timestamp"]
-            for _cat, v in entries(d):
-                if v.get("timestamp"):
-                    return v["timestamp"]
-            return None
-
-        def sld_first(d: dict):
-            lst = d.get("string_list_data") or []
-            return lst[0] if lst and isinstance(lst[0], dict) else {}
-
-        def items_of(d):
-            if isinstance(d, list):
-                return [x for x in d if isinstance(x, dict)]
-            if isinstance(d, dict):
-                return [x for x in next((v for v in d.values() if isinstance(v, list)), []) if isinstance(x, dict)]
-            return []
-
-        def media_first(it: dict) -> dict:
-            media = it.get("media") or []
-            return media[0] if media and isinstance(media[0], dict) else {}
-
-        if name.startswith("followers"):
-            for it in items_of(data):
-                s = sld_first(it)
-                self.rows["followers"].append({"user": s.get("value", ""), "timestamp": self.iso(s.get("timestamp"))})
-        elif name.startswith("following"):
-            for it in items_of(data):
-                s = sld_first(it)
-                self.rows["following"].append({"user": s.get("value", ""), "timestamp": self.iso(s.get("timestamp"))})
-        elif "comments" in name:
-            for it in items_of(data):
-                c, o = by_cat(it, "free_text"), by_cat(it, "username", "person_name")
-                text = c.get("value", "") if isinstance(c.get("value"), str) else ""
-                self.rows["comments"].append({"on_post_by": o.get("value", ""), "timestamp": self.iso(when(it)),
-                                              "n_words": len(WORD_RE.findall(text)), "text": text})
-        elif "liked" in name or "likes" in low:
-            for it in items_of(data):
-                self.rows["likes"].append({"post_by": it.get("title", ""), "kind": "comment" if "comment" in name else "post",
-                                           "timestamp": self.iso(when(it))})
-        elif "saved" in low:
-            for it in items_of(data):
-                self.rows["saved"].append({"post_by": it.get("title", ""), "timestamp": self.iso(when(it))})
-        elif (name.startswith("posts") and "viewed" not in name) or "archived_posts" in name or "recently_deleted" in name:
-            for it in items_of(data):
-                m0 = media_first(it)
-                cap = it.get("title") or m0.get("title", "") or ""
-                ts = it.get("creation_timestamp") or m0.get("creation_timestamp")
-                self.rows["posts"].append({"timestamp": self.iso(ts), "n_media": len(it.get("media") or []),
-                                           "hashtags": " ".join(HASHTAG_RE.findall(cap)),
-                                           "n_mentions": len(S.MENTION_RE.findall(cap)),
-                                           "n_words": len(WORD_RE.findall(cap)), "caption": cap,
-                                           "source": "archived" if "archived" in name else "deleted" if "deleted" in name else "posts"})
-        elif "ads_viewed" in name or "ads_clicked" in name:
-            for it in items_of(data):
-                a = by_cat(it, "business_or_app", "username", "person_name")
-                self.rows["ads_viewed"].append({"advertiser": a.get("value", ""),
-                                                "kind": "clicked" if "clicked" in name else "viewed",
-                                                "timestamp": self.iso(when(it))})
-        elif "posts_viewed" in name or "videos_watched" in name:
-            table = "posts_viewed" if "posts_viewed" in name else "videos_watched"
-            for it in items_of(data):
-                a = by_cat(it, "username", "person_name")
-                author = a.get("value", "")
-                self.rows[table].append({"author": author,
-                                         "in_network": bool(re.fullmatch(r"me|user_\w+", author)),
-                                         "timestamp": self.iso(when(it))})
-        elif "suggested_accounts" in name:
-            for it in items_of(data):
-                a = by_cat(it, "username", "person_name")
-                self.rows["suggested_accounts"].append({"account": a.get("value", ""), "timestamp": self.iso(when(it))})
-        elif "advertisers_using" in name:
-            for it in items_of(data):
-                self.rows["advertisers"].append({
-                    "advertiser": it.get("advertiser_name", ""),
-                    "uploaded_your_contact_details": bool(it.get("has_data_file_custom_audience")),
-                    "tracked_you_on_their_site": bool(it.get("has_remarketing_custom_audience")),
-                    "in_store_visit": bool(it.get("has_in_person_store_visit"))})
-        elif "off_meta" in low or "off_of_instagram" in low:
-            for it in items_of(data):
-                app = it.get("name", "")
-                for ev in it.get("events") or []:
-                    if isinstance(ev, dict):
-                        self.rows["off_meta_activity"].append({"app_or_site": app, "event": ev.get("type", ""),
-                                                               "timestamp": self.iso(ev.get("timestamp"))})
-                if not it.get("events"):
-                    self.rows["off_meta_activity"].append({"app_or_site": app, "event": "", "timestamp": ""})
-        elif "your_topics" in name or "ads_interests" in name or "recommended_topics" in name:
-            for it in items_of(data):
-                t = by_cat(it, "topic", "business_or_app", "free_text", "person_name", "username")
-                if t.get("value"):
-                    self.rows["topics"].append({"topic": t.get("value", ""),
-                                                "source": "ads_interests" if "interests" in name else "your_topics"})
-        elif name.startswith("stories"):
-            for it in items_of(data):
-                self.rows["stories"].append({"timestamp": self.iso(it.get("creation_timestamp")),
-                                             "has_caption": bool(it.get("title"))})
-        elif name.startswith("reels"):
-            for it in items_of(data):
-                m0 = media_first(it)
-                cap = it.get("title") or m0.get("title", "") or ""
-                self.rows["reels"].append({"timestamp": self.iso(it.get("creation_timestamp") or m0.get("creation_timestamp")),
-                                           "caption": cap})
+        """Fill the tidy tables from the anonymised JSON of one file (see harvest_file)."""
+        harvest_file(data, fi.rel, self.rows, self.iso)
 
     # -- identity ------------------------------------------------------------
     def profile(self, data: Any) -> dict:
@@ -821,19 +1075,7 @@ class _Anonymiser:
         (root / "profile.json").write_text(json.dumps(profile, indent=1), encoding="utf-8")
         self.res.kept.append((self.root_out + "/" if self.root_in else "") + "profile.json")
         # csv tables
-        for name, rows in self.rows.items():
-            if not rows:
-                continue
-            cols = list(rows[0].keys())
-            for r in rows:
-                for c in r:
-                    if c not in cols:
-                        cols.append(c)
-            with open(out / "csv" / f"{name}.csv", "w", newline="", encoding="utf-8") as fh:
-                w = csv.DictWriter(fh, fieldnames=cols)
-                w.writeheader()
-                w.writerows(rows)
-            self.res.tables[name] = len(rows)
+        self.res.tables = write_tables(self.rows, out / "csv")
         # pseudonym map (private) and report
         with open(out / "pseudonym_map.csv", "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=["pseudonym", "real_value", "kind"])

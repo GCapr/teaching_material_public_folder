@@ -76,8 +76,15 @@ to that page.
   (includes a re-scan of the output with `ig_pii_scan`) and `pseudonym_map.csv` (private;
   `pack()` leaves it out of the zip).
 
+Both export layouts are handled: the older `string_map_data` / `string_list_data` files and the
+2026 `label_values` layout (values under `label`/`value`/`vec`/`dict`+`title` blocks, `fbid`
+identifiers). In the new layout the author of a viewed, liked or saved post comes as a block
+(URL + Name + Username) that is treated as one unit. `tables_from_json(json_dir, out_dir)`
+re-derives the CSV tables from an anonymised tree after a tool update.
+
 Limits: no NER, so a stranger's name typed in a caption survives; the phone pattern has
-false positives (a run of 3-digit numbers); nothing is checked inside images (dropped anyway).
+false positives (a run of 3-digit numbers); nothing is checked inside images (dropped anyway);
+lone words are only treated as names when they look like handles or are at least 8 letters.
 
 ## Testing locally
 

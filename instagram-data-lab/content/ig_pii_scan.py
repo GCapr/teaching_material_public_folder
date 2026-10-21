@@ -94,6 +94,9 @@ FILE_RULES = [
     (r"possible_phone|possible_email|autofill|contact_info",
      "contact_details", "high", "DROP",
      "Phone numbers, emails or addresses Meta associates with you."),
+    (r"checkout|payment|shopping/|autofill_information",
+     "payment_details", "high", "DROP",
+     "Names, e-mails, phones, mailing addresses and payment details used for checkout."),
     (r"recent_searches|profile_searches|word_or_phrase_searches|search_history",
      "search_history", "high", "DROP",
      "Accounts and words you searched for: sensitive, and the accounts are often not in your network."),
@@ -101,8 +104,8 @@ FILE_RULES = [
      r"profile_changes|personal_information/personal_information",
      "identity", "high", "DROP, or keep only non-identifying fields",
      "Name, username, email, phone, birthday, gender, bio, previous usernames."),
-    (r"ads_viewed|ads_clicked|posts_viewed|videos_watched|suggested_accounts_viewed|your_topics|ads_interests|"
-     r"advertisers_using|off_meta|off_of_instagram|apps_and_websites",
+    (r"(^|/)ads_viewed|(^|/)ads_clicked|posts_viewed|videos_watched|threads_viewed|suggested_accounts_viewed|"
+     r"your_topics|ads_interests|advertisers_using|off_meta|off_of_instagram|apps_and_websites",
      "platform_activity", "medium", "KEEP: business/app/topic names stay; people from your network are pseudonymised",
      "What the platform showed you and inferred about you: ads and posts seen, suggested accounts, interests, "
      "advertisers holding your data, apps and sites reporting your activity to Meta."),
@@ -142,7 +145,7 @@ KEY_OVERRIDES = [
     (r"recent_searches|profile_searches", r"^(search|value|title)$", "username", "medium"),
     (r"followers|following|close_friends|blocked|pending|unfollowed|restricted|muted|favorite|"
      r"hide_story|follow_requests|removed_suggestions|relationships", r"^(title|value)$", "username", "medium"),
-    (r"ads_viewed|ads_clicked", r"^(author|value|title)$", "business_or_app", "medium"),
+    (r"(^|/)ads_viewed|(^|/)ads_clicked", r"^(author|value|title)$", "business_or_app", "medium"),
     (r"your_topics|ads_interests|recommended_topics|topics\.json", r"^(name|value|interest|title|topic)$", "topic", "low"),
     (r"off_meta|off_of_instagram|apps_and_websites|advertisers|ads_and_businesses",
      r"^(name|title|value|advertiser_name)$", "business_or_app", "medium"),
@@ -160,6 +163,7 @@ KEY_RULES = [
     (r"\bphone|\bmobile\b|\btel\b|\bwhatsapp\b|telefon|tel[eé]fono|t[eé]l[eé]phone|cellulare|\bhandy\b|\bportable\b|"
      r"\bm[oó]vil\b|\bcelular\b", "phone", "high"),
     (r"\bip\b", "ip_address", "high"),
+    (r"identifier|\bfbid\b|\bpk\b|\bmedia id\b|\buser id\b", "identifier", "medium"),
     (r"latitude|longitude|latitud|longitud|breitengrad|l[aä]ngengrad|\blat\b|\blng\b|\blon\b|coordinate|coordonn|coordenad",
      "geo_coordinates", "high"),
     (r"\bbirth|\bdob\b|nascita|geburt|naissance|nacimiento|compleanno|anniversaire|cumplea", "date_of_birth", "high"),
@@ -677,25 +681,50 @@ def _classify_key(ctx_keys: list, leaf_key: str, rel_lower: str):
     return (hit[0], hit[1], sem) if hit else (None, None, sem)
 
 
-def _iter_leaves(node: Any, path: tuple = (), label: Optional[str] = None) -> Iterator[tuple]:
+LV_VALUE_KEYS = {"value", "href", "vec", "dict", "timestamp_value", "media"}
+
+
+def _field_name_keys(node: dict) -> set:
+    """Keys of a dict that are field names, not data, in Meta's label_values layout:
+    {"label": "Caption", "value": ...}, {"label": "Author", "vec": [...]}, {"dict": [...], "title": "Owner"},
+    and a bare {"label": "Ad library public URL"} header."""
+    out = set()
+    if isinstance(node.get("label"), str) and (len(node) == 1 or any(k in node for k in LV_VALUE_KEYS)):
+        out.add("label")
+    if isinstance(node.get("title"), str) and "dict" in node:
+        out.add("title")
+    return out
+
+
+NOT_PEOPLE_BLOCKS = {"hashtags", "hashtag", "mentions", "topics", "topic", "place", "location", "luogo", "ort",
+                     "lieu", "lugar"}
+
+
+def _iter_leaves(node: Any, path: tuple = (), label: Optional[str] = None, block: str = "") -> Iterator[tuple]:
     """Yield (path, value, label, sibling_text) for every scalar, dict by dict.
 
-    `label` is the nearest enclosing {"label": ..., "value"/"vec": ...} label, which
-    newer exports use instead of a named key.
+    `label` is the nearest enclosing field name: a {"label": ...} or a {"dict": [...], "title": ...}
+    entry of the label_values layout that newer exports use instead of named keys.
     """
     if isinstance(node, dict):
-        if isinstance(node.get("label"), str):
+        names = _field_name_keys(node)
+        if "label" in names:
             label = node["label"]
-        leaves = [(k, v) for k, v in node.items() if not isinstance(v, (dict, list))]
+        elif "title" in names and node["title"].strip():
+            label = node["title"]
+            block = node["title"].strip().lower()
+        leaves = [(k, v) for k, v in node.items() if not isinstance(v, (dict, list)) and k not in names]
         sib = " ".join(_fix(v).lower() for _, v in leaves if isinstance(v, str))
+        if block in NOT_PEOPLE_BLOCKS:
+            sib += " \0block:" + block
         for k, v in leaves:
-            yield path + (k,), v, (label if k == "value" else None), sib
+            yield path + (k,), v, (label if k in ("value", "href", "timestamp_value") else None), sib
         for k, v in node.items():
             if isinstance(v, (dict, list)):
-                yield from _iter_leaves(v, path + (k,), label)
+                yield from _iter_leaves(v, path + (k,), label, block)
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            yield from _iter_leaves(v, path + (i,), label)
+            yield from _iter_leaves(v, path + (i,), label, block)
     else:
         yield path, node, None, ""
 
@@ -736,15 +765,18 @@ class _NameMatcher:
             if not words:
                 continue
             joined = "".join(w.replace(".", "").replace("_", "") for w in words)
-            if len(words) == 1 and (len(joined) < MIN_SINGLE_TOKEN or joined.isdigit()):
-                continue
+            username_like = bool(re.search(r"[._0-9]", p.value))
+            if len(words) == 1:
+                # a lone word is matched only when it looks like a handle ("anna.k_88") or is long
+                # enough not to be an ordinary word of some language ("sunny", "milano" are skipped)
+                if joined.isdigit() or (not username_like and len(joined) < 8) or len(joined) < MIN_SINGLE_TOKEN:
+                    continue
             self.table.setdefault(tuple(words), p)
-            if len(joined) >= MIN_SINGLE_TOKEN and not joined.isdigit():
-                self.table.setdefault((joined,), p)
-            if len(words) > 1:
-                for w in words:
-                    if len(w) >= MIN_SINGLE_TOKEN and w not in STOP_NAMES and not w.isdigit():
-                        self.table.setdefault((w,), p)
+            if len(words) > 1 and len(joined) >= 8 and not joined.isdigit():
+                self.table.setdefault((joined,), p)       # "annakowalski": hashtags, folder slugs
+            if len(words) == 2 and p.kind == "person_name" and all(w.isalpha() and len(w) >= 5 for w in words) \
+                    and words[1] not in STOP_NAMES and p.value.split()[1][:1].isupper():
+                self.table.setdefault((words[1],), p)     # the surname of "Anna Kowalski"
         self.maxn = max((len(k) for k in self.table), default=0)
 
     def find(self, text: str) -> list:
@@ -841,15 +873,15 @@ def _pattern_findings(text: str, key_cat: Optional[str], fi: FileInfo, loc: str,
 
 def _harvest_json(data: Any, fi: FileInfo, rep: Report) -> None:
     """Pass 1: collect every username / display name, and learn which ones are yours."""
-    for path, val, label, _sib in _iter_leaves(data):
-        if not isinstance(val, str):
+    for path, val, label, sib in _iter_leaves(data):
+        if not isinstance(val, str) or "\0block:" in sib:
             continue
         ctx, leaf_key = _context(path, label)
         cat, _sev, _k = _classify_key(ctx, leaf_key, fi.rel_lower)
         if cat not in ("username", "person_name", "profile_history"):
             continue
         v = _fix(val).strip()
-        if _boring(v) or v.startswith("inbox/"):
+        if _boring(v) or v.startswith("inbox/") or v.lower().startswith(("http://", "https://")):
             continue
         if cat == "profile_history":  # previous usernames / names; skip old bios
             if not (USERNAME_LIKE_RE.fullmatch(v) or (len(v) <= 40 and len(v.split()) <= 4)):
@@ -876,6 +908,11 @@ def _scan_json(data: Any, fi: FileInfo, rep: Report, matcher: _NameMatcher) -> N
         cat, sev, skey = _classify_key(ctx, leaf_key, fi.rel_lower)
         sval = _fix(val) if isinstance(val, str) else None
         text = sval if sval is not None else str(val)
+        if sval and sval.lower().startswith(("http://", "https://")) and cat != "url":
+            cat = "url"
+        if "\0block:" in sib and cat in ("username", "person_name"):
+            cat = "location_text" if sib.split("\0block:")[-1] in ("place", "location", "luogo", "ort", "lieu", "lugar") else "free_text"
+            sev = "medium" if cat == "location_text" else "review"
         loc = _path_str(path)
         if cat == "url":
             if sval is None or not sval.lower().startswith(("http://", "https://")):
