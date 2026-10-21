@@ -774,8 +774,10 @@ class _NameMatcher:
             self.table.setdefault(tuple(words), p)
             if len(words) > 1 and len(joined) >= 8 and not joined.isdigit():
                 self.table.setdefault((joined,), p)       # "annakowalski": hashtags, folder slugs
-            if len(words) == 2 and p.kind == "person_name" and all(w.isalpha() and len(w) >= 5 for w in words) \
-                    and words[1] not in STOP_NAMES and p.value.split()[1][:1].isupper():
+            parts = p.value.split()
+            if len(words) == 2 and len(parts) == 2 and p.kind == "person_name" \
+                    and all(w.isalpha() and len(w) >= 5 for w in words) \
+                    and words[1] not in STOP_NAMES and parts[1][:1].isupper():
                 self.table.setdefault((words[1],), p)     # the surname of "Anna Kowalski"
         self.maxn = max((len(k) for k in self.table), default=0)
 
