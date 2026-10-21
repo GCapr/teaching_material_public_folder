@@ -72,7 +72,7 @@ to that page.
   Instagram post links lose their post code; timestamps kept or shifted (`--shift-days`).
 - Writes `json/` (original layout), `csv/` (tidy tables: messages, threads, followers,
   following, posts, comments, likes, saved, stories, ads_viewed, posts_viewed,
-  videos_watched, suggested_accounts, advertisers, off_meta_activity, topics), `anonymisation_report.md`
+  videos_watched, suggested_accounts, feedback, advertisers, off_meta_activity, topics), `anonymisation_report.md`
   (includes a re-scan of the output with `ig_pii_scan`) and `pseudonym_map.csv` (private;
   `pack()` leaves it out of the zip).
 

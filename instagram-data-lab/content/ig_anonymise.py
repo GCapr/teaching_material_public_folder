@@ -69,7 +69,8 @@ __all__ = ["anonymise", "Anonymised", "TEXT_POLICIES"]
 
 ADS_POLICIES = ("keep", "drop")
 ADS_POLICY_HELP = {
-    "keep": "ads and posts shown to you, suggested accounts, inferred interests, advertisers holding your data and "
+    "keep": "ads and posts shown to you, suggested accounts, your interested / not-interested feedback, inferred "
+            "interests, advertisers holding your data and "
             "apps/sites reporting to Meta are kept; business, app and topic names stay, people from your network "
             "are pseudonymised, authors you do not follow (public accounts by construction) stay visible",
     "drop": "all of that is removed",
@@ -87,7 +88,10 @@ DROP_TYPES = {"address_book", "security_log", "device_info", "location", "contac
               "off_platform_activity", "settings", "media_file", "payment_details", "search_history"}
 # files whose entries are content you consumed: an author outside your network is a public account
 CONSUMED_RE = re.compile(r"posts_viewed|videos_watched|threads_viewed|ads_viewed|ads_clicked|liked_posts|"
-                         r"saved_posts|story_likes|stories_viewed|liked_comments")
+                         r"saved_posts|story_likes|stories_viewed|liked_comments|posts_you.?re_(not_)?interested")
+# files that list *people* the platform showed you (suggested profiles, profiles you dismissed): every
+# account in them is pseudonymised, whether or not it is in your network, and its link is dropped
+PEOPLE_RE = re.compile(r"suggested_(accounts|profiles)|profiles_you.?re_(not_)?interested")
 # titles of nested blocks that describe a place, not a person
 PLACE_TITLES = {"place", "location", "luogo", "ort", "lieu", "lugar"}
 HASHTAG_TITLES = {"hashtags", "hashtag", "mentions", "topics", "topic"}
@@ -329,7 +333,7 @@ def domain_of(url: str) -> str:
 
 TABLES = ("messages", "threads", "followers", "following", "follow_requests", "posts", "comments", "likes",
           "saved", "stories", "reels", "ads_viewed", "posts_viewed", "videos_watched", "threads_viewed",
-          "stories_viewed", "story_likes", "suggested_accounts", "advertisers", "off_meta_activity", "topics",
+          "stories_viewed", "story_likes", "suggested_accounts", "feedback", "advertisers", "off_meta_activity", "topics",
           "insights_posts", "insights_stories", "insights_summary")
 PSEUDO_RE = re.compile(r"me|user_\w+")
 
@@ -414,6 +418,19 @@ def lv_hashtags(fields: dict) -> list:
     return []
 
 
+def lv_media(fields: dict) -> dict:
+    """The post described by an item: the item itself, or its nested "Media" block when the caption and
+    hashtags live there (the "interested / not interested" feedback files)."""
+    if isinstance(_by_cat(fields, "free_text"), str) or lv_hashtags(fields):
+        return fields
+    for k, v in fields.items():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            sub = v[0]
+            if isinstance(_by_cat(sub, "free_text"), str) or lv_hashtags(sub):
+                return sub
+    return fields
+
+
 def _smd(item: dict) -> dict:
     return item.get("string_map_data") or {}
 
@@ -458,17 +475,22 @@ def harvest_file(data: Any, rel: str, rows: dict, iso=_iso_utc) -> None:
     items = _items_of(data)
     new_layout = bool(items) and "label_values" in items[0]
 
-    def consumed(table, kind=None):
+    def consumed(table, kind=None, extra=()):
         for it in items:
             if new_layout:
                 f = lv_fields(it)
                 o = lv_owner(f)
-                cap = _by_cat(f, "free_text")
+                m = lv_media(f)
+                cap = _by_cat(m, "free_text")
                 cap = cap if isinstance(cap, str) else ""
                 row = {"author": o["username"], "author_name": o["name"],
                        "in_network": bool(PSEUDO_RE.fullmatch(o["username"] or "")),
                        "timestamp": iso(it.get("timestamp")), "n_words_caption": _n_words(cap),
-                       "hashtags": " ".join(lv_hashtags(f))}
+                       "hashtags": " ".join(lv_hashtags(m))}
+                for lab in ("Feedback", "Surface", "Source"):
+                    if lab in extra:
+                        v = f.get(lab)
+                        row[lab.lower()] = v if isinstance(v, str) else ""
             else:
                 o = _smd_by_cat(it, "username", "person_name", "business_or_app") or it.get("title", "")
                 row = {"author": o, "author_name": "", "in_network": bool(PSEUDO_RE.fullmatch(o or "")),
@@ -516,8 +538,20 @@ def harvest_file(data: Any, rel: str, rows: dict, iso=_iso_utc) -> None:
         consumed("threads_viewed")
     elif name.startswith("ads_viewed") or name.startswith("ads_clicked"):
         consumed("ads_viewed", "clicked" if "clicked" in name else "viewed")
-    elif "suggested_accounts" in name:
+    elif "suggested_accounts" in name or "suggested_profiles" in name:
         consumed("suggested_accounts")
+    elif name.startswith("posts_you") and "interested" in name:
+        consumed("feedback", "post", extra=("Feedback", "Surface", "Source"))
+        if "not_interested" in name and "interested_or" not in name:   # file without a Feedback label
+            for r in rows["feedback"]:
+                if not r.get("feedback"):
+                    r["feedback"] = "Not interested"
+    elif name.startswith("profiles_you") and "interested" in name:
+        consumed("feedback", "profile")
+        for r in rows["feedback"]:
+            r.setdefault("feedback", "Not interested")
+            r.setdefault("surface", "")
+            r.setdefault("source", "")
     elif "advertisers_using" in name:
         for it in items:
             if new_layout:
@@ -676,7 +710,8 @@ class Anonymised:
                                ("topics", "inferred interests / topic settings"), ("ads_viewed", "ads seen"),
                                ("posts_viewed", "posts seen"), ("videos_watched", "videos watched"),
                                ("threads_viewed", "Threads posts seen"),
-                               ("suggested_accounts", "accounts suggested to you (pseudonymised)")):
+                               ("suggested_accounts", "accounts suggested to you (pseudonymised)"),
+                               ("feedback", "posts / profiles you marked (not) interesting")):
                 n = self.tables.get(key)
                 if n:
                     L.append(f"  {n:6,d}  {label}")
@@ -817,7 +852,8 @@ class _Anonymiser:
         """{"dict": [{"label": "URL"...}, {"label": "Name"...}, {"label": "Username"...}], "title": ""}
         describes one account; treat its three fields as a unit so that name, handle and link
         get the same treatment (kept visible for a public account, one pseudonym otherwise)."""
-        entries = node.get("dict")
+        ekey = "dict" if "dict" in node else "label_values"     # an item that *is* an account (suggested profiles)
+        entries = node.get(ekey)
         if not isinstance(entries, list) or not entries or not all(isinstance(e, dict) and "label" in e for e in entries):
             return None
         labels = {S._norm_key(e.get("label", "")): i for i, e in enumerate(entries)}
@@ -856,8 +892,16 @@ class _Anonymiser:
         elif username:
             self.counts["accounts pseudonymised (content you consumed)" if CONSUMED_RE.search(rel.lower())
                         else "accounts pseudonymised"] += 1
-        res = dict(node)
-        res["dict"] = out
+        res = {}
+        for k, v in node.items():
+            if k == ekey:
+                res[k] = out
+            elif str(k).lower() in DROP_KEYS:
+                self.counts["metadata fields removed (location/device/identifier)"] += 1
+            elif isinstance(v, (dict, list)):
+                res[k] = self.walk(v, rel, (k,), label, "owner")
+            else:
+                res[k] = self.scalar(k, v, rel, (), label, "owner")
         return res
 
     def scalar(self, k: str, v: Any, rel: str, path: tuple, label: Optional[str], block: str = "") -> Any:
@@ -914,6 +958,9 @@ class _Anonymiser:
         return self.free_text(sv)
 
     def link(self, url: str, rel: str = "") -> str:
+        if rel and PEOPLE_RE.search(rel.lower()):     # lists of people: a personal site identifies them
+            self.counts["links removed (lists of people)"] += 1
+            return "[removed]"
         m = S.IG_PROFILE_RE.search(url)
         if m:
             u = S._ig_user(m)

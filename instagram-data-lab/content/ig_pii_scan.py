@@ -104,11 +104,12 @@ FILE_RULES = [
      r"profile_changes|personal_information/personal_information",
      "identity", "high", "DROP, or keep only non-identifying fields",
      "Name, username, email, phone, birthday, gender, bio, previous usernames."),
-    (r"(^|/)ads_viewed|(^|/)ads_clicked|posts_viewed|videos_watched|threads_viewed|suggested_accounts_viewed|"
-     r"your_topics|ads_interests|advertisers_using|off_meta|off_of_instagram|apps_and_websites",
+    (r"(^|/)ads_viewed|(^|/)ads_clicked|posts_viewed|videos_watched|threads_viewed|suggested_(accounts|profiles)|"
+     r"interested_in|your_topics|ads_interests|advertisers_using|off_meta|off_of_instagram|apps_and_websites",
      "platform_activity", "medium", "KEEP: business/app/topic names stay; people from your network are pseudonymised",
-     "What the platform showed you and inferred about you: ads and posts seen, suggested accounts, interests, "
-     "advertisers holding your data, apps and sites reporting your activity to Meta."),
+     "What the platform showed you and inferred about you: ads and posts seen, suggested accounts, posts and "
+     "profiles you marked as (not) interesting, interests, advertisers holding your data, apps and sites "
+     "reporting your activity to Meta."),
     (r"link_history|ads_and_businesses|ads_and_topics|ads_about|subscription|information_about_you",
      "off_platform_activity", "medium", "DROP",
      "Links you opened in the in-app browser and other inferred data."),
