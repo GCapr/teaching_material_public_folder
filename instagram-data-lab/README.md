@@ -50,8 +50,15 @@ to that page.
 ## What the anonymiser does (`ig_anonymise.py`)
 
 - Drops the files the scanner marks DROP (login/IP history, devices, synced contacts,
-  inferred locations, phone/e-mail records, advertisers, off-Meta activity, link history,
-  settings) and all media. The identity file becomes a minimal `profile.json`.
+  inferred locations, phone/e-mail records, search history, link history, settings) and
+  all media. The identity file becomes a minimal `profile.json`.
+- Keeps the platform's side (`ads="keep"`, the default; `"drop"` removes it): ads and posts
+  shown, videos watched, suggested accounts, inferred interests, advertisers holding the
+  student's data, apps/sites reporting to Meta. Business, app and topic names stay; for
+  posts viewed / videos watched an author outside the student's network is a public account
+  by construction (private posts are only visible to followers) and stays visible, authors
+  in the network are pseudonymised; suggested accounts are always pseudonymised. The
+  notebook prints the kept names for review before packing.
 - Replaces every username / display name / DM-folder slug by a stable pseudonym
   (`user_0001`…; the owner is `me`); the forms of one person are merged by their
   letters-and-digits skeleton, so `anna.kowalski`, `Anna Kowalski` and the folder
@@ -63,7 +70,9 @@ to that page.
   phones, IPs, coordinates, card numbers and street addresses replaced by placeholders.
 - Location / device fields stripped from post metadata; links reduced to their domain;
   Instagram post links lose their post code; timestamps kept or shifted (`--shift-days`).
-- Writes `json/` (original layout), `csv/` (tidy tables), `anonymisation_report.md`
+- Writes `json/` (original layout), `csv/` (tidy tables: messages, threads, followers,
+  following, posts, comments, likes, saved, stories, ads_viewed, posts_viewed,
+  videos_watched, suggested_accounts, advertisers, off_meta_activity, topics), `anonymisation_report.md`
   (includes a re-scan of the output with `ig_pii_scan`) and `pseudonym_map.csv` (private;
   `pack()` leaves it out of the zip).
 

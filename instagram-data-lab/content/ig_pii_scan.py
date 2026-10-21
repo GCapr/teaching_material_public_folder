@@ -101,10 +101,14 @@ FILE_RULES = [
      r"profile_changes|personal_information/personal_information",
      "identity", "high", "DROP, or keep only non-identifying fields",
      "Name, username, email, phone, birthday, gender, bio, previous usernames."),
-    (r"advertisers_using|off_meta|off_of_instagram|apps_and_websites|link_history|ads_and_businesses|"
-     r"ads_and_topics|your_topics|ads_viewed|posts_viewed|videos_watched|ads_about|subscription|information_about_you",
-     "off_platform_activity", "medium", "DROP (or keep aggregate counts only)",
-     "Businesses that uploaded your data, apps/sites that reported your activity, links you opened, inferred interests."),
+    (r"ads_viewed|ads_clicked|posts_viewed|videos_watched|suggested_accounts_viewed|your_topics|ads_interests|"
+     r"advertisers_using|off_meta|off_of_instagram|apps_and_websites",
+     "platform_activity", "medium", "KEEP: business/app/topic names stay; people from your network are pseudonymised",
+     "What the platform showed you and inferred about you: ads and posts seen, suggested accounts, interests, "
+     "advertisers holding your data, apps and sites reporting your activity to Meta."),
+    (r"link_history|ads_and_businesses|ads_and_topics|ads_about|subscription|information_about_you",
+     "off_platform_activity", "medium", "DROP",
+     "Links you opened in the in-app browser and other inferred data."),
     (r"followers|following|close_friends|blocked|pending_follow|unfollowed|restricted|muted|hide_story|"
      r"favorite|follow_requests|removed_suggestions|relationships|(^|/)connections/",
      "social_graph", "medium", "PSEUDONYMIZE usernames",
@@ -138,7 +142,9 @@ KEY_OVERRIDES = [
     (r"recent_searches|profile_searches", r"^(search|value|title)$", "username", "medium"),
     (r"followers|following|close_friends|blocked|pending|unfollowed|restricted|muted|favorite|"
      r"hide_story|follow_requests|removed_suggestions|relationships", r"^(title|value)$", "username", "medium"),
-    (r"off_meta|off_of_instagram|apps_and_websites|advertisers|your_topics|ads_and_businesses",
+    (r"ads_viewed|ads_clicked", r"^(author|value|title)$", "business_or_app", "medium"),
+    (r"your_topics|ads_interests|recommended_topics|topics\.json", r"^(name|value|interest|title|topic)$", "topic", "low"),
+    (r"off_meta|off_of_instagram|apps_and_websites|advertisers|ads_and_businesses",
      r"^(name|title|value|advertiser_name)$", "business_or_app", "medium"),
     (r"link_history", r"^(href|url|value)$", "browsing_history", "medium"),
     (r"profile_changes", r"^(previous value|new value)$", "profile_history", "medium"),
@@ -432,6 +438,7 @@ class Report:
     findings: list = field(default_factory=list)
     people: dict = field(default_factory=dict)       # lower-cased value -> Person
     self_names: set = field(default_factory=set)
+    network: set = field(default_factory=set)        # lower-cased names of people you follow / who follow you / DM contacts
     media: Counter = field(default_factory=Counter)
     formats: Counter = field(default_factory=Counter)
     notes: list = field(default_factory=list)
@@ -852,6 +859,8 @@ def _harvest_json(data: Any, fi: FileInfo, rep: Report) -> None:
         if fi.file_type == "identity" or (fi.file_type == "security_log" and cat == "username"):
             subject = "self"
         rep.remember(v, cat, subject)
+        if fi.file_type in ("social_graph", "private_messages"):
+            rep.network.add(v.lower())
 
 
 def _scan_json(data: Any, fi: FileInfo, rep: Report, matcher: _NameMatcher) -> None:
@@ -972,6 +981,7 @@ def _scan_paths(rep: Report) -> None:
                 tm = THREAD_RE.match(part)
                 if tm and ("thread", part) not in seen:
                     seen.add(("thread", part))
+                    rep.network.add(tm.group(1).lower())
                     rep.add(Finding("medium", "person_name", "/".join(parts[:idx + 1]), "private_messages",
                                     "folder name", "thread folder", tm.group(1), mask(tm.group(1), "person_name"),
                                     "other", "path"))

@@ -67,6 +67,14 @@ except ImportError:  # notebook opened from another folder
 __version__ = "0.1.0"
 __all__ = ["anonymise", "Anonymised", "TEXT_POLICIES"]
 
+ADS_POLICIES = ("keep", "drop")
+ADS_POLICY_HELP = {
+    "keep": "ads and posts shown to you, suggested accounts, inferred interests, advertisers holding your data and "
+            "apps/sites reporting to Meta are kept; business, app and topic names stay, people from your network "
+            "are pseudonymised, authors you do not follow (public accounts by construction) stay visible",
+    "drop": "all of that is removed",
+}
+PLATFORM_TYPES = {"platform_activity"}
 TEXT_POLICIES = ("metadata", "own", "all")
 TEXT_POLICY_HELP = {
     "metadata": "other people's messages reduced to timestamps/lengths; your own messages too",
@@ -128,7 +136,9 @@ class Pseudonymizer:
     letters-and-digits skeleton coincide are treated as one person and share a pseudonym.
     """
 
-    def __init__(self, people: dict, self_names: set, seed: Optional[str] = None):
+    def __init__(self, people: dict, self_names: set, seed: Optional[str] = None, network: Optional[set] = None):
+        self.network = {n.lower() for n in (network or set())}
+        self.network_slugs = {_slug(n) for n in self.network if len(_slug(n)) >= MIN_MERGE_SLUG}
         self.map: dict = {}           # lower-cased real value -> pseudonym
         self.kind: dict = {}          # lower-cased real value -> username | person_name
         self.display: dict = {}       # lower-cased real value -> original spelling
@@ -187,6 +197,16 @@ class Pseudonymizer:
             self.display[k] = raw
         self.used.add(p)
         return p
+
+    def in_network(self, value: str) -> bool:
+        """Is this person you, someone you follow / who follows you, or a DM contact?"""
+        k = S._fix(value).strip().lower()
+        if not k:
+            return False
+        if k in self.self_names or k in self.network:
+            return True
+        slug = _slug(k)
+        return len(slug) >= MIN_MERGE_SLUG and slug in self.network_slugs
 
     def in_text(self, text: str) -> str:
         """Replace @mentions, instagram.com/<user> links and known names inside free text."""
@@ -306,6 +326,7 @@ class Anonymised:
     out_dir: str
     text_policy: str
     shift_days: int
+    ads_policy: str = "keep"
     dropped: list = field(default_factory=list)          # (file, file_type)
     kept: list = field(default_factory=list)             # files written to the JSON tree
     counts: Counter = field(default_factory=Counter)     # what was transformed
@@ -315,10 +336,11 @@ class Anonymised:
     rescan: Optional[Any] = None                         # ig_pii_scan.Report of the output
     warnings: list = field(default_factory=list)
     unclassified: list = field(default_factory=list)     # kept files the scanner did not recognise
+    public_accounts: set = field(default_factory=set)    # authors kept visible on purpose (not in your network)
 
     def report(self) -> str:
         L = [f"Anonymisation report  -  {S._display_path(Path(self.source).name)}", "=" * 78,
-             f"Output: {Path(self.out_dir).name}/   text policy: {self.text_policy}   "
+             f"Output: {Path(self.out_dir).name}/   text policy: {self.text_policy}   platform data: {self.ads_policy}   "
              f"timestamps: {'shifted by a hidden number of days' if self.shift_days else 'unchanged'}",
              f"People pseudonymised: {self.n_people:,} (you -> 'me'; map in pseudonym_map.csv - keep it private)"]
         for w in self.warnings:
@@ -335,6 +357,16 @@ class Anonymised:
             L += ["", "KEPT BUT NOT A KNOWN EXPORT FILE - check these by hand before sharing"]
             for f in self.unclassified:
                 L.append(f"  {S._display_path(f)}")
+        if self.ads_policy == "keep":
+            L += ["", "PLATFORM DATA KEPT (business, app and topic names stay visible - review before sharing)"]
+            for key, label in (("advertisers", "advertisers that hold your data"),
+                               ("off_meta_activity", "events reported to Meta by apps/sites"),
+                               ("topics", "inferred interests"), ("ads_viewed", "ads seen"),
+                               ("posts_viewed", "posts seen"), ("videos_watched", "videos watched"),
+                               ("suggested_accounts", "accounts suggested to you (pseudonymised)")):
+                n = self.tables.get(key)
+                if n:
+                    L.append(f"  {n:6,d}  {label}")
         L += ["", "TRANSFORMATIONS"]
         for k, n in self.counts.most_common():
             L.append(f"  {n:6,d}  {k}")
@@ -352,10 +384,13 @@ class Anonymised:
             others = [c for c in cats if c["severity"] != "high"]
             if others:
                 L.append("  other findings: " + ", ".join(f"{c['category']} {c['occurrences']}" for c in others))
-            names = {p.value for p in self.rescan.people.values() if not re.fullmatch(r"(me|user_\w+|group_\w+)", p.value)}
+            names = {p.value for p in self.rescan.people.values()
+                     if not re.fullmatch(r"(me|user_\w+|group_\w+)", p.value) and p.value.lower() not in self.public_accounts}
             L.append(f"  non-pseudonym names still present: {len(names)}"
                      + (f"  e.g. {[S.mask(n) for n in sorted(names)[:5]]} (masked; see pii_people.csv of a scan of the output)"
-                        if names else ""))
+                        if names else "")
+                     + (f"   (not counting {len(self.public_accounts)} public accounts kept on purpose)"
+                        if self.public_accounts else ""))
         return "\n".join(L)
 
 
@@ -364,14 +399,22 @@ class Anonymised:
 # ---------------------------------------------------------------------------
 
 class _Anonymiser:
-    def __init__(self, src: S._Source, scan: S.Report, out: Path, text: str, shift_days: int, seed: Optional[str]):
-        self.src, self.scan, self.out, self.text, self.shift = src, scan, out, text, shift_days
-        self.P = Pseudonymizer(scan.people, scan.self_names, seed)
-        self.res = Anonymised(str(src.path), str(out), text, shift_days, n_people=len(self.P.map) - len(self.P.self_names),
-                              pseudonymizer=self.P)
+    def __init__(self, src: S._Source, scan: S.Report, out: Path, text: str, shift_days: int, seed: Optional[str],
+                 ads: str = "keep"):
+        self.src, self.scan, self.out, self.text, self.shift, self.ads = src, scan, out, text, shift_days, ads
+        self.P = Pseudonymizer(scan.people, scan.self_names, seed, network=scan.network)
+        self.res = Anonymised(str(src.path), str(out), text, shift_days, ads_policy=ads, pseudonymizer=self.P)
         self.counts = self.res.counts
+        self.drop_types = set(DROP_TYPES) | (PLATFORM_TYPES if ads == "drop" else set())
+        self.network_known = bool(scan.network)
+        if ads == "keep" and not self.network_known:
+            self.res.warnings.append("No followers/following/DM files in this export, so it is impossible to tell "
+                                     "which accounts in 'posts viewed' / 'videos watched' are public: all of them "
+                                     "were pseudonymised.")
         self.rows: dict = {k: [] for k in ("messages", "threads", "followers", "following", "posts", "comments",
-                                           "likes", "saved", "stories", "reels")}
+                                           "likes", "saved", "stories", "reels", "ads_viewed", "posts_viewed",
+                                           "videos_watched", "suggested_accounts", "advertisers",
+                                           "off_meta_activity", "topics")}
         self.root_in = self._root_name()
         self.root_out = "instagram-anonymised"
 
@@ -473,10 +516,22 @@ class _Anonymiser:
         nsem = S._norm_key(sem)
         if lk == "thread_path" or nsem == "thread path":
             return self.out_rel(sv)
+        low = rel.lower()
         if cat in ("username", "person_name", "profile_history"):
+            if cat == "username" and ("posts_viewed" in low or "videos_watched" in low):
+                # content you saw: a private account's posts are only visible to followers, so an
+                # author outside your network is a public account and may stay visible
+                if self.network_known and not self.P.in_network(sv):
+                    self.counts["public accounts kept visible (posts/videos viewed)"] += 1
+                    self.res.public_accounts.add(sv.strip().lower())
+                    return sv
+                self.counts["network accounts pseudonymised (posts/videos viewed)"] += 1
             return self.P(sv)
+        if cat in ("business_or_app", "topic"):
+            self.counts[f"{'business/app' if cat == 'business_or_app' else 'topic'} names kept"] += 1
+            return redact_patterns(sv, self.counts)
         if cat in ("email", "phone", "ip_address", "geo_coordinates", "date_of_birth", "contact_details",
-                   "device_or_session", "location_text", "business_or_app", "browsing_history", "gender"):
+                   "device_or_session", "location_text", "browsing_history", "gender"):
             self.counts[f"fields removed ({cat})"] += 1
             return "[removed]"
         if cat == "url" or sv.lower().startswith(("http://", "https://")):
@@ -638,7 +693,7 @@ class _Anonymiser:
         elif "saved" in low:
             for it in items_of(data):
                 self.rows["saved"].append({"post_by": it.get("title", ""), "timestamp": self.iso(when(it))})
-        elif name.startswith("posts") or "archived_posts" in name or "recently_deleted" in name:
+        elif (name.startswith("posts") and "viewed" not in name) or "archived_posts" in name or "recently_deleted" in name:
             for it in items_of(data):
                 m0 = media_first(it)
                 cap = it.get("title") or m0.get("title", "") or ""
@@ -648,6 +703,46 @@ class _Anonymiser:
                                            "n_mentions": len(S.MENTION_RE.findall(cap)),
                                            "n_words": len(WORD_RE.findall(cap)), "caption": cap,
                                            "source": "archived" if "archived" in name else "deleted" if "deleted" in name else "posts"})
+        elif "ads_viewed" in name or "ads_clicked" in name:
+            for it in items_of(data):
+                a = by_cat(it, "business_or_app", "username", "person_name")
+                self.rows["ads_viewed"].append({"advertiser": a.get("value", ""),
+                                                "kind": "clicked" if "clicked" in name else "viewed",
+                                                "timestamp": self.iso(when(it))})
+        elif "posts_viewed" in name or "videos_watched" in name:
+            table = "posts_viewed" if "posts_viewed" in name else "videos_watched"
+            for it in items_of(data):
+                a = by_cat(it, "username", "person_name")
+                author = a.get("value", "")
+                self.rows[table].append({"author": author,
+                                         "in_network": bool(re.fullmatch(r"me|user_\w+", author)),
+                                         "timestamp": self.iso(when(it))})
+        elif "suggested_accounts" in name:
+            for it in items_of(data):
+                a = by_cat(it, "username", "person_name")
+                self.rows["suggested_accounts"].append({"account": a.get("value", ""), "timestamp": self.iso(when(it))})
+        elif "advertisers_using" in name:
+            for it in items_of(data):
+                self.rows["advertisers"].append({
+                    "advertiser": it.get("advertiser_name", ""),
+                    "uploaded_your_contact_details": bool(it.get("has_data_file_custom_audience")),
+                    "tracked_you_on_their_site": bool(it.get("has_remarketing_custom_audience")),
+                    "in_store_visit": bool(it.get("has_in_person_store_visit"))})
+        elif "off_meta" in low or "off_of_instagram" in low:
+            for it in items_of(data):
+                app = it.get("name", "")
+                for ev in it.get("events") or []:
+                    if isinstance(ev, dict):
+                        self.rows["off_meta_activity"].append({"app_or_site": app, "event": ev.get("type", ""),
+                                                               "timestamp": self.iso(ev.get("timestamp"))})
+                if not it.get("events"):
+                    self.rows["off_meta_activity"].append({"app_or_site": app, "event": "", "timestamp": ""})
+        elif "your_topics" in name or "ads_interests" in name or "recommended_topics" in name:
+            for it in items_of(data):
+                t = by_cat(it, "topic", "business_or_app", "free_text", "person_name", "username")
+                if t.get("value"):
+                    self.rows["topics"].append({"topic": t.get("value", ""),
+                                                "source": "ads_interests" if "interests" in name else "your_topics"})
         elif name.startswith("stories"):
             for it in items_of(data):
                 self.rows["stories"].append({"timestamp": self.iso(it.get("creation_timestamp")),
@@ -687,12 +782,12 @@ class _Anonymiser:
         profile = {"username": "me", "private_account": None}
         signup_ts = None
         for fi in self.scan.files:
-            if fi.file_type in DROP_TYPES or fi.kind != "json" or fi.rel not in parsed:
+            if fi.file_type in self.drop_types or fi.kind != "json" or fi.rel not in parsed:
                 if fi.kind == "json" and fi.file_type == "security_log" and "signup" in fi.rel_lower and fi.rel in parsed:
                     for path, val, label, _ in S._iter_leaves(parsed[fi.rel]):
                         if isinstance(path[-1], str) and path[-1] == "timestamp" and isinstance(val, (int, float)) and val:
                             signup_ts = val
-                if fi.kind != "json" or fi.file_type in DROP_TYPES or fi.error:
+                if fi.kind != "json" or fi.file_type in self.drop_types or fi.error:
                     self.res.dropped.append((fi.rel, fi.file_type))
                 continue
             data = parsed[fi.rel]
@@ -779,10 +874,12 @@ def _prepare_output_dir(out: Path, source: Path) -> None:
 
 
 def anonymise(source, out_dir="anonymised", text: str = "metadata", shift_days: bool | int = False,
-              seed: Optional[str] = None, rescan: bool = True) -> Anonymised:
+              seed: Optional[str] = None, rescan: bool = True, ads: str = "keep") -> Anonymised:
     """Anonymise an export folder or .zip into out_dir. Returns an Anonymised result (see .report())."""
     if text not in TEXT_POLICIES:
         raise ValueError(f"text must be one of {TEXT_POLICIES}")
+    if ads not in ADS_POLICIES:
+        raise ValueError(f"ads must be one of {ADS_POLICIES}")
     src = S._Source(source)
     scan = S.scan(source)
     if shift_days is True:
@@ -795,7 +892,7 @@ def anonymise(source, out_dir="anonymised", text: str = "metadata", shift_days: 
                   "language the scanner does not know), so 'own' would keep nobody's text safely: "
                   "the text policy was changed to 'metadata'")
         text = "metadata"
-    anon = _Anonymiser(src, scan, Path(out_dir), text, shift, seed)
+    anon = _Anonymiser(src, scan, Path(out_dir), text, shift, seed, ads=ads)
     if forced:
         anon.res.warnings.append(forced)
     res = anon.run()
@@ -828,6 +925,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("-o", "--out", default="anonymised", help="output directory (default: anonymised)")
     ap.add_argument("--text", choices=TEXT_POLICIES, default="metadata",
                     help="; ".join(f"{k}: {v}" for k, v in TEXT_POLICY_HELP.items()))
+    ap.add_argument("--ads", choices=ADS_POLICIES, default="keep",
+                    help="; ".join(f"{k}: {v}" for k, v in ADS_POLICY_HELP.items()))
     ap.add_argument("--shift-days", action="store_true", help="shift all timestamps by a random 30-400 days")
     ap.add_argument("--seed", help="seed for the pseudonym order / day shift (same seed -> same output)")
     ap.add_argument("--no-rescan", action="store_true", help="skip re-scanning the output with ig_pii_scan")
@@ -837,7 +936,8 @@ def main(argv: Optional[list] = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:
         pass
-    res = anonymise(a.source, a.out, text=a.text, shift_days=a.shift_days, seed=a.seed, rescan=not a.no_rescan)
+    res = anonymise(a.source, a.out, text=a.text, shift_days=a.shift_days, seed=a.seed, rescan=not a.no_rescan,
+                    ads=a.ads)
     print(res.report())
     if a.zip:
         print("\nPacked:", pack(a.out))

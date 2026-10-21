@@ -28,8 +28,10 @@ page has loaded, switch off Wi-Fi — everything keeps working.
 
 ## 3. Anonymise it
 
-1. Open `02_anonymise.ipynb` and run the cells. The default keeps no message text at all;
-   the notebook explains the other options.
+1. Open `02_anonymise.ipynb` and run the cells. The default keeps no message text at all
+   but keeps what the platform did with you (ads shown, inferred interests, advertisers
+   holding your data, apps reporting to Meta); the notebook explains the options and shows
+   you the names that will stay visible before you pack the result.
 2. The report ends with a re-scan of the output by the same scanner: it should find
    **0 HIGH** items and only pseudonyms.
 3. Right-click `anonymised.zip` → **Download**. This is the copy that can leave your
