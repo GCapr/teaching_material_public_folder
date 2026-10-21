@@ -94,6 +94,9 @@ FILE_RULES = [
     (r"possible_phone|possible_email|autofill|contact_info",
      "contact_details", "high", "DROP",
      "Phone numbers, emails or addresses Meta associates with you."),
+    (r"recent_searches|profile_searches|word_or_phrase_searches|search_history",
+     "search_history", "high", "DROP",
+     "Accounts and words you searched for: sensitive, and the accounts are often not in your network."),
     (r"personal_information\.(json|html?)|account_information|instagram_profile_information|"
      r"profile_changes|personal_information/personal_information",
      "identity", "high", "DROP, or keep only non-identifying fields",
@@ -130,7 +133,9 @@ GENERIC_KEYS = {"value", "string_map_data", "string_list_data", "media_map_data"
 KEY_OVERRIDES = [
     # (regex on path, regex on the leaf key, category, severity)
     (r"(^|/)messages/|(^|/)inbox/|message_requests|secret_conversations", r"^title$", "person_name", "medium"),
-    (r"likes|liked|saved", r"^title$", "username", "medium"),
+    (r"likes|liked|saved|story_sticker|polls|questions|quizzes|emoji_slider|countdown|story_interactions",
+     r"^title$", "username", "medium"),
+    (r"recent_searches|profile_searches", r"^(search|value|title)$", "username", "medium"),
     (r"followers|following|close_friends|blocked|pending|unfollowed|restricted|muted|favorite|"
      r"hide_story|follow_requests|removed_suggestions|relationships", r"^(title|value)$", "username", "medium"),
     (r"off_meta|off_of_instagram|apps_and_websites|advertisers|your_topics|ads_and_businesses",
@@ -142,25 +147,41 @@ KEY_OVERRIDES = [
 
 # Generic key rules, matched against the normalised key ("Phone_Number" -> "phone number").
 # Order matters: the first match wins.
+# English first, then the labels Meta uses when the account language is Italian, German,
+# French or Spanish (exports are localised). Add your language's labels here if needed.
 KEY_RULES = [
-    (r"\be-?mail", "email", "high"),
-    (r"\bphone|\bmobile\b|\btel\b|\bwhatsapp\b", "phone", "high"),
+    (r"\be-?mail|\bcorreo\b|\bcourriel\b|posta elettronica", "email", "high"),
+    (r"\bphone|\bmobile\b|\btel\b|\bwhatsapp\b|telefon|tel[eé]fono|t[eé]l[eé]phone|cellulare|\bhandy\b|\bportable\b|"
+     r"\bm[oó]vil\b|\bcelular\b", "phone", "high"),
     (r"\bip\b", "ip_address", "high"),
-    (r"latitude|longitude|\blat\b|\blng\b|\blon\b|coordinate", "geo_coordinates", "high"),
-    (r"\bbirth|\bdob\b", "date_of_birth", "high"),
-    (r"\bgender\b|\bpronoun", "gender", "medium"),
-    (r"\bcontact\b", "contact_details", "high"),
-    (r"user agent|\bdevice|\bcookie|app version|\bimei\b|\bserial\b|\bmac address|\bbrowser\b|\bplatform\b",
-     "device_or_session", "medium"),
-    (r"advertiser|\bbusiness\b|\bapp\b|\bbrand\b|\bmerchant\b|\bshop\b|\bstore\b", "business_or_app", "medium"),
-    (r"\bcity\b|location|\baddress\b|\bplace\b|\bcountry\b|\bregion\b|\bzip\b|\bpostal\b|\bstate\b|\bhometown\b",
-     "location_text", "medium"),
+    (r"latitude|longitude|latitud|longitud|breitengrad|l[aä]ngengrad|\blat\b|\blng\b|\blon\b|coordinate|coordonn|coordenad",
+     "geo_coordinates", "high"),
+    (r"\bbirth|\bdob\b|nascita|geburt|naissance|nacimiento|compleanno|anniversaire|cumplea", "date_of_birth", "high"),
+    (r"\bgender\b|\bpronoun|\bgenere\b|geschlecht|\bgenre\b|g[eé]nero|\bsesso\b|\bsexe\b|\bsexo\b", "gender", "medium"),
+    (r"\bcontact\b|\bcontatt|\bkontakt|\bcontacto", "contact_details", "high"),
+    (r"user agent|\bdevice|dispositiv|ger[aä]t|appareil|\bcookie|app version|\bimei\b|\bserial\b|\bmac address|"
+     r"\bbrowser\b|\bplatform\b|piattaforma|plateforme|plataforma", "device_or_session", "medium"),
+    (r"advertiser|inserzionist|werbetreibend|annonceur|anunciante|\bbusiness\b|\bapp\b|\bbrand\b|\bmerchant\b|\bshop\b|"
+     r"\bstore\b|\bazienda\b|unternehmen|entreprise|\bempresa\b", "business_or_app", "medium"),
+    (r"\bcity\b|location|\baddress\b|\bplace\b|\bcountry\b|\bregion\b|\bzip\b|\bpostal\b|\bstate\b|\bhometown\b|"
+     r"\bcitt[aà]\b|\bstadt\b|\bville\b|\bciudad\b|posizione|standort|\blieu\b|ubicaci|localizaci|indirizzo|adresse|"
+     r"direcci[oó]n|\bpaese\b|\bland\b|\bpays\b|\bpa[ií]s\b|\bluogo\b|\bort\b|\blugar\b", "location_text", "medium"),
     (r"user ?name|media owner|\bauthor\b|\bowner\b|\bhandle\b|\bcreator\b|\bmentioned\b|\btagged\b|"
-     r"\baccount name\b|thread path", "username", "medium"),
-    (r"\bname\b|\bparticipant|\bactor\b|\bsender\b|\brecipient\b", "person_name", "medium"),
+     r"\baccount name\b|thread path|nome utente|benutzername|nom d.utilisateur|nombre de usuario|"
+     r"proprietari|eigent[uü]mer|inhaber|propri[eé]taire|propietari|\bautore\b|\bautor\b|\bauteur\b|"
+     r"\bmittente\b|\babsender\b|exp[eé]diteur|\bremitente\b|destinatari|empf[aä]nger|menzionat|erw[aä]hnt|"
+     r"\btaggat|markiert|identifi[eé]|etiquetad|\bcreatore\b|\bersteller\b|\bcr[eé]ateur\b|\bcreador\b",
+     "username", "medium"),
+    (r"\bname\b|\bparticipant|\bactor\b|\bsender\b|\brecipient\b|\bnome\b|\bnom\b|\bnombre\b|partecipant|"
+     r"teilnehmer|participante|\battore\b", "person_name", "medium"),
     (r"\bbio\b|content|caption|comment|\btext\b|message|question|answer|\bnote|description|\btitle\b|"
-     r"\bstatus\b|\breply|\bbody\b|\bsubject\b", "free_text", "review"),
-    (r"\bhref\b|\burl\b|\blink\b|website|\buri\b", "url", "low"),
+     r"\bstatus\b|\breply|\bbody\b|\bsubject\b|contenut|inhalt|contenu|contenido|didascalia|bildunterschrift|"
+     r"l[eé]gende|leyenda|\bcomment|kommentar|comentario|\btesto\b|\btexte\b|\btexto\b|messaggio|nachricht|"
+     r"mensaje|domanda|\bfrage\b|pregunta|risposta|antwort|r[eé]ponse|respuesta|biografia|biograf|descrizione|"
+     r"beschreibung|descripci|\btitolo\b|\btitel\b|\btitre\b|t[ií]tulo|\bnota\b|\bnotiz\b|\bsearch\b|ricerca|"
+     r"\bsuche\b|recherche|b[uú]squeda", "free_text", "review"),
+    (r"\bhref\b|\burl\b|\blink\b|website|\buri\b|sito web|webseite|site web|sitio web|collegamento|\benlace\b|\blien\b",
+     "url", "low"),
 ]
 
 _KEY_OVERRIDES = [(re.compile(p, re.I), re.compile(k, re.I), c, s) for p, k, c, s in KEY_OVERRIDES]
@@ -177,15 +198,18 @@ IP6_CAND_RE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:]{2,45}(?![\w:.])")
 COORD_PAIR_RE = re.compile(r"(?<![\d.-])-?\d{1,2}\.\d{3,}\s*,\s*-?\d{1,3}\.\d{3,}(?![\d.])")
 CARD_RE = re.compile(r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])")
 PHONE_RE = re.compile(
-    r"(?<![\w.+-])(?:\+\d{8,15}|(?:\+\d{1,3}[\s.-]?)?(?:\(\d{1,4}\)[\s.-]?|\d{2,4}[\s.-])(?:\d{2,4}[\s.-]?){1,3}\d{2,4})"
+    r"(?<![\w.+-])(?:\+\d{8,15}|(?:\+\d{1,3}[\s.-]?)?(?:\(\d{1,4}\)[\s.-]?|\d{2,4}[\s.-])(?:\d{2,4}[\s.-]?){1,3}\d{2,4}"
+    r"|\d{9,12})"
     r"(?![\w:-])")
 DATE_IN_RE = re.compile(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}")
+IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b")
 ADDRESS_RE = re.compile(
     r"\b\d{1,5}[A-Za-z]?\s+(?:[A-Z][A-Za-z'.-]*\s){1,3}"
     r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl|Square|Sq|"
     r"Terrace|Ter|Parkway|Pkwy|Highway|Hwy)\b\.?"
-    r"|\b[A-ZÄÖÜ][\w'.-]*(?:straße|strasse|gasse|weg|platz|allee)\s+\d{1,5}[A-Za-z]?\b"
-    r"|\b(?:Rue|Via|Calle|Avenida|Rua|Piazza|Viale|Corso)\s+(?:[\w'-]+\s){1,4}\d{1,5}[A-Za-z]?\b")
+    r"|(?i:\b[\w'.-]*(?:straße|strasse|gasse|weg|platz|allee)\s+\d{1,5}[A-Za-z]?\b)"
+    r"|(?i:\b(?:rue|via|calle|avenida|rua|piazza|viale|corso|vicolo|largo|avenue|boulevard|plaza|paseo|carrer|"
+    r"strada|chemin|impasse|allée|place)\s+(?:[\w'-]+\s){1,4}\d{1,5}[A-Za-z]?\b)")
 MENTION_RE = re.compile(r"(?<![\w.@/])@([A-Za-z0-9_](?:[A-Za-z0-9_.]{0,28}[A-Za-z0-9_])?)")
 IG_PROFILE_RE = re.compile(r"instagram\.com/([A-Za-z0-9_.]+)(?:/([A-Za-z0-9_.]+))?", re.I)
 IG_RESERVED = {"p", "reel", "reels", "tv", "igtv", "explore", "accounts", "direct", "stories", "s", "share",
@@ -207,6 +231,8 @@ USERNAME_LIKE_RE = re.compile(r"[A-Za-z0-9_.]{2,30}")
 
 def _fix(s: str) -> str:
     """Undo Instagram's encoding quirk: UTF-8 bytes written as one \\u00XX escape each."""
+    if not isinstance(s, str):
+        return "" if s is None else str(s)
     try:
         return s.encode("latin-1").decode("utf-8")
     except (UnicodeEncodeError, UnicodeDecodeError):
@@ -217,9 +243,12 @@ def _norm_key(k: str) -> str:
     return re.sub(r"[_\-]+", " ", str(k)).strip().lower()
 
 
+PLACEHOLDER_RE = re.compile(r"^(\[[A-Za-z ]+\]|<[a-z ]+>|\*+)$")  # [removed], [EMAIL], <media removed>, ****
+
+
 def _boring(s: str) -> bool:
     t = s.strip()
-    if t.lower() in _BORING:
+    if t.lower() in _BORING or PLACEHOLDER_RE.match(t):
         return True
     return not re.search(r"[A-Za-z0-9À-￿]", t)
 
@@ -270,8 +299,22 @@ def _looks_like_phone(s: str) -> bool:
     digits = re.sub(r"\D", "", s)
     if not 7 <= len(digits) <= 15 or DATE_IN_RE.search(s):
         return False
+    if s.isdigit():  # bare number: 9-12 digits (e.g. Italian mobiles "3331234567")
+        return 9 <= len(s) <= 12
     seps = len(re.findall(r"[\s.()-]", s))
     return s.startswith("+") or "(" in s or seps >= 2 or (seps >= 1 and len(digits) >= 9)
+
+
+def _looks_like_iban(s: str) -> bool:
+    t = s.replace(" ", "")
+    if not 15 <= len(t) <= 34:
+        return False
+    rearranged = t[4:] + t[:4]
+    try:
+        n = int("".join(str(int(c, 36)) for c in rearranged))
+    except ValueError:
+        return False
+    return n % 97 == 1
 
 
 def _ig_user(m: "re.Match") -> Optional[str]:
@@ -315,6 +358,8 @@ def mask(value: Any, category: str = "") -> str:
     if category == "card_number":
         d = re.sub(r"\D", "", v)
         return "**** **** **** " + d[-4:]
+    if category == "bank_account":
+        return v[:2] + "** **** ... " + v[-3:]
     if category == "ip_address":
         return (v.split(":")[0] + ":****:****") if ":" in v else (v.split(".")[0] + ".*.*.*")
     if category == "geo_coordinates":
@@ -553,15 +598,23 @@ class _Source:
             self.zf = zipfile.ZipFile(p)
         self.root_name = p.name
 
+    @staticmethod
+    def _junk(rel: str) -> bool:
+        parts = rel.replace("\\", "/").split("/")
+        return any(p in ("__MACOSX", "..", ".") or p.startswith("._") or p == ".DS_Store" for p in parts) \
+            or rel.startswith("/")
+
     def entries(self) -> Iterator[tuple]:
         if self.zf is not None:
             for info in self.zf.infolist():
-                if not info.is_dir():
+                if not info.is_dir() and not self._junk(info.filename):
                     yield info.filename, info.file_size
         else:
             for f in sorted(self.path.rglob("*")):
                 if f.is_file():
-                    yield f.relative_to(self.path).as_posix(), f.stat().st_size
+                    rel = f.relative_to(self.path).as_posix()
+                    if not self._junk(rel):
+                        yield rel, f.stat().st_size
 
     def read(self, rel: str) -> bytes:
         if self.zf is not None:
@@ -656,7 +709,17 @@ def _words(value: str) -> list:
     return [w.strip(".") for w in TOKEN_RE.findall(value.lower()) if w.strip(".")]
 
 
+MIN_SINGLE_TOKEN = 6   # a lone word is only matched as a name when at least this long ("sunny" is not)
+
+
 class _NameMatcher:
+    """Finds the people of the export inside free text.
+
+    Indexed forms of "Anna Kowalski" / "anna.kowalski": the full name, each word of at least
+    MIN_SINGLE_TOKEN letters (surnames are the strong identifier), and the joined skeleton
+    "annakowalski" (which is how the name appears in hashtags and DM folder names).
+    """
+
     def __init__(self, people: dict):
         self.table: dict = {}
         for p in people.values():
@@ -665,12 +728,16 @@ class _NameMatcher:
             words = _words(p.value)
             if not words:
                 continue
-            joined = "".join(words)
-            if len(words) == 1 and (len(joined) < 5 or joined.isdigit()):
+            joined = "".join(w.replace(".", "").replace("_", "") for w in words)
+            if len(words) == 1 and (len(joined) < MIN_SINGLE_TOKEN or joined.isdigit()):
                 continue
             self.table.setdefault(tuple(words), p)
-            if len(words) > 1 and len(words[0]) >= 5 and words[0] not in STOP_NAMES:
-                self.table.setdefault((words[0],), p)
+            if len(joined) >= MIN_SINGLE_TOKEN and not joined.isdigit():
+                self.table.setdefault((joined,), p)
+            if len(words) > 1:
+                for w in words:
+                    if len(w) >= MIN_SINGLE_TOKEN and w not in STOP_NAMES and not w.isdigit():
+                        self.table.setdefault((w,), p)
         self.maxn = max((len(k) for k in self.table), default=0)
 
     def find(self, text: str) -> list:
@@ -738,6 +805,10 @@ def _pattern_findings(text: str, key_cat: Optional[str], fi: FileInfo, loc: str,
         a, b = m.span()
         if free(a, b):
             emit("geo_coordinates", "high", m.group(), a, b)
+    for m in IBAN_RE.finditer(text):
+        a, b = m.span()
+        if free(a, b) and _looks_like_iban(m.group()):
+            emit("bank_account", "high", m.group(), a, b)
     for m in CARD_RE.finditer(text):
         a, b = m.span()
         if free(a, b) and _looks_like_card(m.group()):

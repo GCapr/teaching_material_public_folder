@@ -26,16 +26,28 @@ page has loaded, switch off Wi-Fi — everything keeps working.
    `report/` folder, which stays in your browser.
 4. Right-click `report.zip` in the file browser → **Download** to keep a copy.
 
-## 3. Clean up
+## 3. Anonymise it
 
-When you are done, right-click the zip and the `report/` folder → **Delete**, or clear
-this site's data in your browser settings. Nothing was uploaded, but there is no reason
-to leave the files in the browser either.
+1. Open `02_anonymise.ipynb` and run the cells. The default keeps no message text at all;
+   the notebook explains the other options.
+2. The report ends with a re-scan of the output by the same scanner: it should find
+   **0 HIGH** items and only pseudonyms.
+3. Right-click `anonymised.zip` → **Download**. This is the copy that can leave your
+   computer (for the analysis notebooks, Colab, a classmate…). `pseudonym_map.csv` links
+   pseudonyms back to real people: it is not in the zip, keep it private or delete it.
+
+## 4. Clean up
+
+When you are done, right-click the raw zip, `report/`, `anonymised/` and the zips →
+**Delete**, or clear this site's data in your browser settings. Nothing was uploaded, but
+there is no reason to leave the files in the browser either.
 
 ## Notes
 
 - Large exports (hundreds of MB) can take a minute to upload into the browser and to scan.
 - Browser storage belongs to this browser on this computer: use the same one next time,
   or re-upload the zip.
-- The same scanner works on a laptop without a browser: download `ig_pii_scan.py` and run
-  `python ig_pii_scan.py instagram-….zip -o report`.
+- Both tools work on a laptop without a browser: download `ig_pii_scan.py` and
+  `ig_anonymise.py` into the same folder and run
+  `python ig_pii_scan.py instagram-….zip -o report` and
+  `python ig_anonymise.py instagram-….zip -o anonymised --zip`.

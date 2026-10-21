@@ -2,8 +2,9 @@
 
 A Jupyter environment that students open as a web page. Python runs inside their
 browser (Pyodide / WebAssembly), the files they drag in stay in their browser's
-storage, and no server ever sees their data. Used in ECOSM 2026 to scan — and later
-anonymise — each student's own Instagram data export.
+storage, and no server ever sees their data. Used in ECOSM 2026 to scan and then
+anonymise each student's own Instagram data export, so that only an anonymised copy
+is ever analysed or shared.
 
 Live site: https://gcapr.github.io/teaching_material_public_folder/instagram-data-lab/
 Direct link to the notebook: https://gcapr.github.io/teaching_material_public_folder/instagram-data-lab/lab/index.html?path=01_scan_for_personal_data.ipynb
@@ -15,7 +16,9 @@ instagram-data-lab/
 ├── content/                         what students see in the file browser
 │   ├── README.md                    instructions for students
 │   ├── 01_scan_for_personal_data.ipynb
-│   └── ig_pii_scan.py               the scanner (standard library only, so it also runs on a laptop)
+│   ├── 02_anonymise.ipynb
+│   ├── ig_pii_scan.py               the scanner (standard library only, so it also runs on a laptop)
+│   └── ig_anonymise.py              the anonymiser (builds on the scanner; same constraints)
 ├── requirements.txt                 build tools (jupyterlite-core, the Pyodide kernel, JupyterLab)
 └── jupyter_lite_config.json         build settings
 .github/workflows/pages.yml          builds the site on every push to ECOSM-2026 and publishes it
@@ -43,6 +46,29 @@ to that page.
   scikit-learn, networkx, …) loads on first import; pure-Python packages from PyPI can be
   installed from a cell with `%pip install name`. Packages with compiled extensions that
   are not in Pyodide (spaCy, for instance) are not available.
+
+## What the anonymiser does (`ig_anonymise.py`)
+
+- Drops the files the scanner marks DROP (login/IP history, devices, synced contacts,
+  inferred locations, phone/e-mail records, advertisers, off-Meta activity, link history,
+  settings) and all media. The identity file becomes a minimal `profile.json`.
+- Replaces every username / display name / DM-folder slug by a stable pseudonym
+  (`user_0001`…; the owner is `me`); the forms of one person are merged by their
+  letters-and-digits skeleton, so `anna.kowalski`, `Anna Kowalski` and the folder
+  `annakowalski_123…` share one pseudonym and the follow graph joins the DM graph.
+- Message text: `metadata` (default: lengths, emoji count, flags, attachments, reactions —
+  no words), `own` (owner's text kept, redacted) or `all` (everything kept, redacted; names
+  of people outside the network are not caught).
+- Captions / comments / bios kept with @mentions and known names pseudonymised and e-mails,
+  phones, IPs, coordinates, card numbers and street addresses replaced by placeholders.
+- Location / device fields stripped from post metadata; links reduced to their domain;
+  Instagram post links lose their post code; timestamps kept or shifted (`--shift-days`).
+- Writes `json/` (original layout), `csv/` (tidy tables), `anonymisation_report.md`
+  (includes a re-scan of the output with `ig_pii_scan`) and `pseudonym_map.csv` (private;
+  `pack()` leaves it out of the zip).
+
+Limits: no NER, so a stranger's name typed in a caption survives; the phone pattern has
+false positives (a run of 3-digit numbers); nothing is checked inside images (dropped anyway).
 
 ## Testing locally
 
