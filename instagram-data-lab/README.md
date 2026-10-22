@@ -54,6 +54,13 @@ to that page.
   records, payments) only the structure, timestamps and yes/no values survive; every other
   value is `[removed]` or a pseudonym. `files="minimal"` drops those files instead. A minimal
   `profile.json` (account age, private flag, follower counts) is written in both modes.
+- Public accounts: authors of liked/saved/viewed posts stay visible when they are not in the
+  owner's network (public by construction) or when they advertise (ad owners / brand partners);
+  followed public accounts can be declared in `PUBLIC_ACCOUNTS` (`suggest_public()` lists the
+  candidates). Everyone else is a pseudonym.
+- Optional `ig_topics.py`: with a local Ollama model, a generic `topic` per liked/saved post
+  (from the caption) and a `tone` per own comment; without a model, tones from a small lexicon.
+  Meta's export carries no description of what a post shows.
 - Keeps the platform's side (`ads="keep"`, the default; `"drop"` removes it): ads and posts
   shown, videos watched, suggested accounts, inferred interests, advertisers holding the
   student's data, apps/sites reporting to Meta. Business, app and topic names stay; for
