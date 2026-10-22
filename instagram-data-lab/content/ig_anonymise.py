@@ -80,10 +80,12 @@ ADS_POLICY_HELP = {
 PLATFORM_TYPES = {"platform_activity"}
 TEXT_POLICIES = ("metadata", "own", "all")
 TEXT_POLICY_HELP = {
-    "metadata": "other people's messages reduced to timestamps/lengths; your own messages too",
-    "own": "your own messages kept (redacted); other people's reduced to metadata",
-    "all": "all message text kept, with pattern redaction and pseudonyms (needs a manual read before sharing)",
+    "metadata": "messages, captions and comments reduced to metadata (lengths, emoji, hashtags, pseudonymised "
+                "mentions); your own text too",
+    "own": "your own messages, captions and comments kept (redacted); other people's messages reduced to metadata",
+    "all": "all text kept, with pattern redaction and pseudonyms (needs a manual read before sharing)",
 }
+CAPTION_META_RE = re.compile(r"\[(\d+) words, (\d+) emoji\]$")
 
 # File types (from ig_pii_scan.FILE_RULES) that are removed entirely under files="minimal".
 DROP_TYPES = {"address_book", "security_log", "device_info", "location", "contact_details",
@@ -98,8 +100,8 @@ FILES_POLICY_HELP = {
 # In these files any text the key rules do not recognise is removed rather than passed through.
 STRICT_TYPES = {"address_book", "security_log", "device_info", "location", "contact_details",
                 "payment_details", "identity"}
-SAFE_ENUM_RE = re.compile(r"(true|false|yes|no|on|off|enabled|disabled|active|inactive|unknown|none|\d+|"
-                          r"public|private|[a-z_]{1,24})", re.I)
+SAFE_ENUM_RE = re.compile(r"([Tt]rue|[Ff]alse|[Yy]es|[Nn]o|[Oo]n|[Oo]ff|[Ee]nabled|[Dd]isabled|[Aa]ctive|[Ii]nactive|"
+                          r"[Uu]nknown|[Nn]one|[Uu]nspecified|[Pp]ublic|[Pp]rivate|\d+|[A-Z]{2}|[a-z_]{1,24})")
 # files whose entries are content you consumed: an author outside your network is a public account
 CONSUMED_RE = re.compile(r"posts_viewed|videos_watched|threads_viewed|ads_viewed|ads_clicked|liked_posts|"
                          r"saved_posts|story_likes|stories_viewed|liked_comments|posts_you.?re_(not_)?interested")
@@ -477,7 +479,10 @@ def _items_of(d):
 
 
 def _n_words(t) -> int:
-    return len(WORD_RE.findall(t)) if isinstance(t, str) else 0
+    if not isinstance(t, str):
+        return 0
+    m = CAPTION_META_RE.search(t)
+    return int(m.group(1)) if m else len(WORD_RE.findall(t))
 
 
 def harvest_file(data: Any, rel: str, rows: dict, iso=_iso_utc) -> None:
@@ -773,6 +778,9 @@ class _Anonymiser:
         self.drop_types = ({"media_file"} if files == "all" else set(DROP_TYPES)) \
             | (PLATFORM_TYPES if ads == "drop" else set())
         self.strict_rels = {fi.rel for fi in scan.files if fi.file_type in STRICT_TYPES}
+        # the owner's own captions / comments (not the captions of posts shown to them)
+        self.own_text_rels = {fi.rel for fi in scan.files
+                              if fi.file_type == "activity_content" and not CONSUMED_RE.search(fi.rel_lower)}
         self.network_known = bool(scan.network)
         if ads == "keep" and not self.network_known:
             self.res.warnings.append("No followers/following/DM files in this export, so it is impossible to tell "
@@ -828,6 +836,15 @@ class _Anonymiser:
             return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
         except (TypeError, ValueError, OverflowError, OSError):
             return ""
+
+    def caption_meta(self, s: str) -> str:
+        """A caption or comment reduced to what it is about: hashtags, pseudonymised @mentions, and
+        its size - '#rome #sunset @user_0012 [14 words, 2 emoji]'."""
+        t = S._fix(s)
+        tags = ["#" + h for h in HASHTAG_RE.findall(t)]
+        mentions = [self.P.in_text("@" + m) for m in S.MENTION_RE.findall(t)]
+        self.counts["captions/comments reduced to metadata"] += 1
+        return " ".join(tags + mentions + [f"[{len(WORD_RE.findall(t))} words, {len(EMOJI_RE.findall(t))} emoji]"])
 
     def free_text(self, s: str) -> str:
         """Captions, comments, bios: keep, with pseudonyms, redaction and domain-only links."""
@@ -977,6 +994,8 @@ class _Anonymiser:
         if rel in self.strict_rels and sv.strip() and not SAFE_ENUM_RE.fullmatch(sv.strip()):
             self.counts["values removed (sensitive file, unknown field)"] += 1
             return "[removed]"
+        if self.text == "metadata" and rel in self.own_text_rels and cat == "free_text" and sv.strip():
+            return self.caption_meta(sv)
         return self.free_text(sv)
 
     def link(self, url: str, rel: str = "") -> str:
