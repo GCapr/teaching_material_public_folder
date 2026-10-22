@@ -257,7 +257,8 @@ def _norm_key(k: str) -> str:
     return re.sub(r"[_\-]+", " ", str(k)).strip().lower()
 
 
-PLACEHOLDER_RE = re.compile(r"^(\[[A-Za-z ]+\]|<[a-z ]+>|\*+)$")  # [removed], [EMAIL], <media removed>, ****
+PLACEHOLDER_RE = re.compile(r"^(\[[A-Za-z ]+\]|<[a-z ]+>|\*+|[A-Za-z]{3,12}_[0-9a-f]{8,}|__deleted__\w+|instagram user)$",
+                            re.I)  # [removed], <media removed>, ****, Meta's "Utente_1a2b3c4d" / "__deleted__…" for deleted accounts
 
 
 def _boring(s: str) -> bool:
@@ -937,6 +938,8 @@ def _scan_json(data: Any, fi: FileInfo, rep: Report, matcher: _NameMatcher) -> N
             if sval and len(sval) >= 3 else []
         if cat and cat not in ("url", "free_text") and not _boring(text):
             whole = any(f.value.strip().lower() == text.strip().lower() for f in pattern_hits)
+            if cat == "email" and "@" not in text:
+                cat, sev = "identifier", "medium"      # a timestamp or flag under an "Emails" heading
             if not (cat == "contact_details" and whole):  # the pattern already says email/phone
                 subj = rep.subject_of(text) if cat in NAME_CATEGORIES else ""
                 rep.add(Finding(sev, cat, fi.rel, fi.file_type, loc, skey, text, mask(text, cat), subj, "key"), fi)
