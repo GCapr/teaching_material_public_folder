@@ -113,3 +113,18 @@ interpreter and the packages are downloaded from a CDN as code; students' files 
 into the browser's own storage (IndexedDB) and never leave the machine, because nothing
 in the notebook makes a network request. To demonstrate it in class: open the browser's
 Network tab while a scan runs (no uploads), or load the page, go offline, and run it.
+
+## Collecting the class's data (instructor)
+
+1. Create a **file-request link** on an institutional drive (OneDrive/SharePoint: folder → *Request files*;
+   Dropbox: *File requests*). Uploaders need no account and cannot see other files; the data stays on the
+   university's EU storage. Put the link in the `SHARE_URL` setting of the hand-in cell of notebook 02 (or
+   just tell students in class).
+2. Students run the hand-in cell: `prepare_share()` re-scans the anonymised folder (refuses to pack if a
+   HIGH item or a leftover real name is found), drops the pseudonym map and the JSON tree, and writes
+   `share_<random id>.zip` (CSV tables + report + MANIFEST.json + CONSENT.txt).
+3. Download the uploads into one folder and pool them on your computer:
+   `python3 content/ig_share.py pool hand-ins/ pooled/` → `pooled/<table>.csv` with a `student` column
+   (the share id) and pseudonyms prefixed by it (`k7f3q2:user_0012`), plus `pooled/SUMMARY.md` with a
+   per-file re-scan verdict and a flag if someone included the pseudonym map by hand.
+Never put hand-ins in this repository.
