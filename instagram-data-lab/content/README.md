@@ -28,7 +28,7 @@ page has loaded, switch off Wi-Fi — everything keeps working.
 
 ## 3. Anonymise it
 
-1. Open `02_anonymise.ipynb` and run the cells. The default keeps no message text at all
+1. Open `02_anonymise.ipynb`, then `03_explore.ipynb` (first analysis of the anonymised tables: activity over the years, rhythm, conversations, network, recommendation share, topics and tones, the advertising side) and run the cells. The default keeps no message text at all
    but keeps what the platform did with you (ads shown, inferred interests, advertisers
    holding your data, apps reporting to Meta); the notebook explains the options and shows
    you the names that will stay visible before you pack the result.

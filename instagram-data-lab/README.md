@@ -17,6 +17,7 @@ instagram-data-lab/
 │   ├── README.md                    instructions for students
 │   ├── 01_scan_for_personal_data.ipynb
 │   ├── 02_anonymise.ipynb
+│   ├── 03_explore.ipynb
 │   ├── ig_pii_scan.py               the scanner (standard library only, so it also runs on a laptop)
 │   └── ig_anonymise.py              the anonymiser (builds on the scanner; same constraints)
 ├── requirements.txt                 build tools (jupyterlite-core, the Pyodide kernel, JupyterLab)
