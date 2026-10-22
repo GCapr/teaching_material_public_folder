@@ -1105,9 +1105,10 @@ class _Anonymiser:
         if rel in self.strict_rels and sv.strip() and not SAFE_ENUM_RE.fullmatch(sv.strip()):
             self.counts["values removed (sensitive file, unknown field)"] += 1
             return "[removed]"
-        if cat == "free_text" and sv.strip() and (self.text == "metadata"
-                                                   or (self.text == "own" and rel not in self.own_text_rels)):
+        if cat == "free_text" and sv.strip() and not re.fullmatch(r"[\d.,:/\- ]+|--|n/?a", sv.strip(), re.I) \
+                and (self.text == "metadata" or (self.text == "own" and rel not in self.own_text_rels)):
             return self.caption_meta(sv)   # captions of posts/stories shown to you, and your own ones
+                                           # (a bare number under "Comments" in the insights is a count, kept)
         return self.free_text(sv)
 
     def link(self, url: str, rel: str = "") -> str:
