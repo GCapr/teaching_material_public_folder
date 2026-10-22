@@ -793,13 +793,28 @@ class Anonymised:
 # Core
 # ---------------------------------------------------------------------------
 
+ORG_NAME_RE = re.compile(
+    r"\b(official|ufficiale|magazine|rivista|shop|store|negozio|museum|museo|universit\w*|school|scuola|journal|"
+    r"news|notizie|tv|radio|agency|agenzia|foundation|fondazione|comune|institute|istituto|academy|accademia|"
+    r"brand|company|srl|s\.r\.l|spa|s\.p\.a|ltd|inc|gmbh|group|gruppo|festival|library|biblioteca|cinema|theatre|"
+    r"theater|teatro|hotel|restaurant|ristorante|trattoria|pizzeria|bakery|panificio|gallery|galleria|collective|"
+    r"collettivo|studio|atelier|boutique|market|mercato|club|associazione|association|ngo|onlus|municipality|"
+    r"ministero|ministry|parliament|parlamento|government|governo|police|polizia|airlines|airport|aeroporto)\b"
+    r"|™|®|\|", re.I)
+
+
 def business_accounts(src: S._Source, scan: S.Report) -> set:
-    """Usernames that advertise on the platform (ad owners and brand partners in ads_viewed / ads_clicked):
-    businesses by construction, so their names may stay visible wherever they occur."""
+    """Usernames that are businesses or organisations by construction, so their names may stay visible
+    wherever they occur: (1) ad owners and brand partners in ads_viewed / ads_clicked - they advertise;
+    (2) authors of content you consumed whose display name says organisation ("... Magazine", "Museo ...",
+    "Official", a '|' tagline) AND who publish a website. Private people are never flagged by one cue
+    alone (a personal website is common, a first-and-last name never carries these words)."""
     out: set = set()
     for fi in scan.files:
-        if fi.kind != "json" or fi.error or not re.search(r"(^|/)ads_viewed|(^|/)ads_clicked", fi.rel_lower):
+        if fi.kind != "json" or fi.error or not CONSUMED_RE.search(fi.rel_lower) \
+                and not re.search(r"(^|/)ads_viewed|(^|/)ads_clicked|interested", fi.rel_lower):
             continue
+        is_ad = bool(re.search(r"(^|/)ads_viewed|(^|/)ads_clicked", fi.rel_lower))
         try:
             data = json.loads(src.read(fi.rel).decode("utf-8"))
         except Exception:
@@ -810,10 +825,16 @@ def business_accounts(src: S._Source, scan: S.Report) -> set:
             f = lv_fields(it) if "label_values" in it else {}
             for k, v in f.items():
                 if isinstance(v, list) and v and isinstance(v[0], dict):
-                    u = _by_cat(v[0], "username")
-                    if isinstance(u, str) and u.strip():
+                    sub = v[0]
+                    u = _by_cat(sub, "username")
+                    if not (isinstance(u, str) and u.strip()):
+                        continue
+                    name = _by_cat(sub, "person_name")
+                    url = _by_cat(sub, "url")
+                    name = S._fix(name) if isinstance(name, str) else ""
+                    if is_ad or (ORG_NAME_RE.search(name) and isinstance(url, str) and url.strip()):
                         out.add(S._fix(u).strip().lower())
-            if not f:
+            if not f and is_ad:
                 u = _smd_by_cat(it, "username")
                 if isinstance(u, str) and u.strip():
                     out.add(S._fix(u).strip().lower())
