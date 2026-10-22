@@ -80,9 +80,9 @@ ADS_POLICY_HELP = {
 PLATFORM_TYPES = {"platform_activity"}
 TEXT_POLICIES = ("metadata", "own", "all")
 TEXT_POLICY_HELP = {
-    "metadata": "messages, captions and comments reduced to metadata (lengths, emoji, hashtags, pseudonymised "
-                "mentions); your own text too",
-    "own": "your own messages, captions and comments kept (redacted); other people's messages reduced to metadata",
+    "metadata": "all text - messages, your captions and comments, captions of the posts and stories shown to you - "
+                "reduced to metadata (word and emoji counts, hashtags, pseudonymised mentions)",
+    "own": "your own messages, captions and comments kept (redacted); everyone else's text reduced to metadata",
     "all": "all text kept, with pattern redaction and pseudonyms (needs a manual read before sharing)",
 }
 CAPTION_META_RE = re.compile(r"\[(\d+) words, (\d+) emoji\]$")
@@ -967,8 +967,9 @@ class _Anonymiser:
         low = rel.lower()
         if block in PLACE_TITLES:
             cat = "location_text"          # a place's name/description, not a person
-        elif block in HASHTAG_TITLES and cat in ("person_name", "username", None):
-            cat = "free_text"              # "#brunch" is a word; a name inside it is caught by the name pass
+        elif block in HASHTAG_TITLES:
+            self.counts["hashtags / topics kept"] += 1
+            return self.free_text(sv)      # "#brunch" is a topic word, kept; a name inside it is caught by the name pass
         if cat in ("username", "person_name", "profile_history"):
             if cat == "username" and CONSUMED_RE.search(low):
                 # content you consumed: a private account's posts are only visible to followers, so an
@@ -994,8 +995,9 @@ class _Anonymiser:
         if rel in self.strict_rels and sv.strip() and not SAFE_ENUM_RE.fullmatch(sv.strip()):
             self.counts["values removed (sensitive file, unknown field)"] += 1
             return "[removed]"
-        if self.text == "metadata" and rel in self.own_text_rels and cat == "free_text" and sv.strip():
-            return self.caption_meta(sv)
+        if cat == "free_text" and sv.strip() and (self.text == "metadata"
+                                                   or (self.text == "own" and rel not in self.own_text_rels)):
+            return self.caption_meta(sv)   # captions of posts/stories shown to you, and your own ones
         return self.free_text(sv)
 
     def link(self, url: str, rel: str = "") -> str:
