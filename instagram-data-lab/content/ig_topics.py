@@ -19,6 +19,7 @@ origin:  OLLAMA_ORIGINS="https://gcapr.github.io" ollama serve
 """
 from __future__ import annotations
 
+import collections
 import csv
 import json
 import re
@@ -56,6 +57,45 @@ _POS = {"bello", "bella", "bellissimo", "bellissima", "bravo", "brava", "bravi",
 _NEG = {"brutto", "brutta", "orribile", "schifo", "vergogna", "no", "mai", "peggio", "odio", "triste", "male",
         "terribile", "noioso", "bad", "worst", "hate", "sad", "awful", "terrible", "ugly", "boring", "wrong",
         "shame", "disgusting", "angry", "😡", "😠", "👎", "😢", "😭", "💔", "🤮", "😞"}
+
+
+# offline topic categories: a few hundred keywords and hashtag stems, Italian and English
+TOPIC_LEXICON = {
+    "food & cooking": "food foodie recipe recipes ricetta ricette cucina cucinare cooking pasta pizza dolce dessert cake torta pane bread colazione breakfast pranzo lunch cena dinner vino wine birra beer caffè coffee ristorante restaurant chef vegan vegetarian homemade fattoincasa aperitivo brunch gelato cioccolato chocolate",
+    "travel & places": "travel viaggio viaggi viaggiare trip wanderlust vacanza vacanze holiday holidays beach spiaggia mare sea island isola montagna mountain mountains hiking trekking escursione roma rome firenze florence milano milan venezia venice paris parigi london londra italia italy europe sunset tramonto landscape paesaggio city città borgo",
+    "fitness & sport": "fitness workout gym palestra allenamento training running corsa run marathon maratona yoga pilates crossfit sport calcio football soccer tennis basket nuoto swim swimming bike bici cycling ciclismo ski sci climbing arrampicata healthy salute wellness benessere",
+    "fashion & beauty": "fashion moda outfit ootd style stile look dress vestito shoes scarpe bag borsa makeup trucco beauty bellezza skincare hair capelli nails unghie jewelry gioielli vintage shopping",
+    "home & design": "home casa interior interiors design arredamento furniture mobili decor decoration architecture architettura ristrutturazione renovation garden giardino plants piante kitchen bathroom bagno tiles ceramica wood legno craft handmade artigianato diy",
+    "art & culture": "art arte artist artista painting pittura dipinto drawing disegno illustration illustrazione sculpture scultura museum museo mostra exhibition gallery galleria photography fotografia photo foto cinema film movie teatro theatre book books libro libri reading lettura poetry poesia history storia",
+    "music": "music musica song canzone concert concerto live album band singer cantante piano guitar chitarra jazz rock pop opera dj festival playlist",
+    "family & friends": "family famiglia friends amici amiche friend amico amica love amore wedding matrimonio sposi bride anniversary anniversario birthday compleanno auguri baby bimbo bimba neonato kids bambini figli mamma papà mom dad nonna grandma together insieme",
+    "pets & animals": "dog cane cani puppy cat gatto gatti kitten pet pets animals animali horse cavallo bird uccello wildlife nature natura zoo",
+    "humour & memes": "meme memes funny lol divertente ridere laugh haha joke battuta comedy satira sarcasm ironia",
+    "news & politics": "news notizie politics politica government governo elezioni election vote voto parliament parlamento minister ministro president presidente war guerra peace pace protest manifestazione rights diritti climate clima economy economia inflation lavoro work strike sciopero europe eu ue",
+    "science & education": "science scienza research ricerca study studio studiare university università phd professor lecture lezione school scuola students studenti learning education educazione data dati statistics economics space spazio nasa physics fisica math matematica biology medicine medicina health",
+    "work & business": "work lavoro business startup entrepreneur imprenditore marketing career carriera office ufficio meeting conference conferenza linkedin brand company azienda product prodotto launch lancio sale saldi offer offerta discount sconto promo adv sponsored ad pubblicità",
+    "motivation & wellbeing": "motivation motivazione mindset inspiration ispirazione quote citazione quotes grateful gratitude gratitudine mindfulness meditation meditazione mentalhealth salutementale selfcare therapy anxiety happiness felicità positive",
+    "nature & outdoors": "nature natura forest foresta bosco lake lago river fiume flowers fiori flower fiore tree alberi sky cielo clouds nuvole snow neve autumn autunno spring primavera summer estate winter inverno sunrise alba stars stelle outdoor",
+    "tech & gaming": "tech technology tecnologia ai artificialintelligence app software coding programming computer phone smartphone iphone gaming videogames videogiochi game console",
+    "cars & motors": "car cars auto automobile moto motorcycle motorbike ferrari porsche bmw f1 formula1 motogp racing corsa engine motore",
+    "faith & spirituality": "faith fede church chiesa prayer preghiera god dio pope papa gospel vangelo bible bibbia blessed benedetto spirituality spiritualità saint santo",
+}
+_TOPIC_INDEX = {w: cat for cat, words in TOPIC_LEXICON.items() for w in words.split()}
+
+
+def topic_offline(caption: str, hashtags: str = "") -> str:
+    """Best-matching topic category from caption words and hashtags; 'other' when nothing matches.
+    No model, no network: runs anywhere, including in the browser."""
+    toks = re.findall(r"[\w']+", (caption + " " + hashtags).lower())
+    hits = collections.Counter()
+    for t in toks:
+        t = t.strip("'")
+        cat = _TOPIC_INDEX.get(t)
+        if cat is None and len(t) > 5:          # hashtag stems: #foodporn -> food, #travelgram -> travel
+            cat = next((c for w, c in _TOPIC_INDEX.items() if len(w) >= 4 and t.startswith(w)), None)
+        if cat:
+            hits[cat] += 1
+    return hits.most_common(1)[0][0] if hits else "other"
 
 
 def tone_offline(text: str) -> str:
@@ -161,15 +201,19 @@ def _captions(source) -> list:
 
 def describe_likes(source, result: Optional[A.Anonymised] = None, out_dir: Optional[str] = None,
                    model: str = DEFAULT_MODEL, url: str = DEFAULT_URL, limit: Optional[int] = None,
-                   verbose: bool = True) -> dict:
+                   offline: Optional[bool] = None, verbose: bool = True) -> dict:
     """Add a `topic` column to likes.csv and saved.csv in the anonymised output.
 
     source  - the raw export (folder or zip), read locally for the captions
     result  - the Anonymised object returned by anonymise(): gives the output folder, the
               timestamp shift and the pseudonymiser used to clean the model's answers
     limit   - stop after this many captions (try 20 first to see the speed of your machine)
-    Returns {"asked": n, "written": {"likes": n, "saved": n}, "skipped": n}.
+    offline - True: classify with the built-in keyword lexicon (18 categories, no model needed);
+              None (default): use the local model when Ollama answers, the lexicon otherwise
+    Returns {"asked": n, "written": {"likes": n, "saved": n}, "skipped": n, "method": ...}.
     """
+    if offline is None:
+        offline = not available(url)
     out = Path(out_dir or (result.out_dir if result else "anonymised"))
     P = result.pseudonymizer if result else None
     shift = result.shift_days if result else 0
@@ -183,6 +227,9 @@ def describe_likes(source, result: Optional[A.Anonymised] = None, out_dir: Optio
     topics: dict = {}
     skipped = 0
     for i, (table, ts, cap) in enumerate(items, 1):
+        if offline:
+            topics[(table, iso(ts))] = topic_offline(cap)
+            continue
         try:
             t = _clean(ask(cap, model, url), P)
         except Exception as e:  # the model is optional: never fail the whole run
@@ -197,6 +244,7 @@ def describe_likes(source, result: Optional[A.Anonymised] = None, out_dir: Optio
             topics[(table, iso(ts))] = t
         if verbose and i % 25 == 0:
             print(f"  {i}/{len(items)} captions described")
+    method = "lexicon (offline)" if offline else model
     written = {}
     for table in ("likes", "saved"):
         path = out / "csv" / f"{table}.csv"
@@ -223,12 +271,11 @@ def describe_likes(source, result: Optional[A.Anonymised] = None, out_dir: Optio
             w.writerows(rows)
         written[table] = n
     if verbose:
-        print(f"Described {len(topics)} posts with {model}; topics written: {written}; failed: {skipped}.")
-        sample = list(topics.values())[:8]
-        if sample:
-            print("Examples:", "; ".join(sample))
-        print("Read the topic column before sharing: the model was told to stay generic, but check it did.")
-    return {"asked": len(items), "written": written, "skipped": skipped}
+        print(f"Described {len(topics)} posts by {method}; topics written: {written}; failed: {skipped}.")
+        print("Topics:", dict(collections.Counter(topics.values()).most_common(10)))
+        if not offline:
+            print("Read the topic column before sharing: the model was told to stay generic, but check it did.")
+    return {"asked": len(items), "written": written, "skipped": skipped, "method": method}
 
 
 def _comments(source) -> list:
