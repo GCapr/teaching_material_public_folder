@@ -6,11 +6,13 @@ ig_anonymise.py - turn an Instagram data export into a copy that is safe to shar
 Companion of ig_pii_scan.py (which must sit next to this file). Reads the raw
 export (folder or .zip) and writes an anonymised copy:
 
-  * files that are pure identifiers are dropped (login/IP history, devices,
-    synced phone contacts, inferred locations, phone/email records, advertisers,
-    off-Meta activity, link history, settings, photos and videos);
-  * the identity file is replaced by a minimal profile.json (account age,
-    private/public flag, follower/following counts);
+  * every JSON file is kept (files="all", the default); photos and videos are
+    dropped. In the sensitive files (identity, login/IP history, devices, synced
+    contacts, inferred locations, phone/email records, payments) only structure,
+    timestamps and yes/no values survive, everything else is "[removed]" or a
+    pseudonym; files="minimal" drops those files instead;
+  * a minimal profile.json (account age, private/public flag, follower/following
+    counts) is written in both modes;
   * every username and display name becomes a stable pseudonym (user_0001, ...),
     the export owner becomes "me"; the same person gets the same pseudonym
     everywhere - follow lists, likes, comments, DM participants, senders,
@@ -83,9 +85,21 @@ TEXT_POLICY_HELP = {
     "all": "all message text kept, with pattern redaction and pseudonyms (needs a manual read before sharing)",
 }
 
-# File types (from ig_pii_scan.FILE_RULES) that are removed entirely.
+# File types (from ig_pii_scan.FILE_RULES) that are removed entirely under files="minimal".
 DROP_TYPES = {"address_book", "security_log", "device_info", "location", "contact_details",
               "off_platform_activity", "settings", "media_file", "payment_details", "search_history"}
+FILES_POLICIES = ("all", "minimal")
+FILES_POLICY_HELP = {
+    "all": "every JSON file of the export is kept (media files excepted: a photo cannot be anonymised); the "
+           "most sensitive ones (identity, logins, devices, locations, contacts, payments) keep only their "
+           "structure, timestamps and yes/no values - every other value is removed or pseudonymised",
+    "minimal": "identity, login, device, location, contact, payment, search and settings files are dropped",
+}
+# In these files any text the key rules do not recognise is removed rather than passed through.
+STRICT_TYPES = {"address_book", "security_log", "device_info", "location", "contact_details",
+                "payment_details", "identity"}
+SAFE_ENUM_RE = re.compile(r"(true|false|yes|no|on|off|enabled|disabled|active|inactive|unknown|none|\d+|"
+                          r"public|private|[a-z_]{1,24})", re.I)
 # files whose entries are content you consumed: an author outside your network is a public account
 CONSUMED_RE = re.compile(r"posts_viewed|videos_watched|threads_viewed|ads_viewed|ads_clicked|liked_posts|"
                          r"saved_posts|story_likes|stories_viewed|liked_comments|posts_you.?re_(not_)?interested")
@@ -673,6 +687,7 @@ class Anonymised:
     text_policy: str
     shift_days: int
     ads_policy: str = "keep"
+    files_policy: str = "all"
     dropped: list = field(default_factory=list)          # (file, file_type)
     kept: list = field(default_factory=list)             # files written to the JSON tree
     counts: Counter = field(default_factory=Counter)     # what was transformed
@@ -686,7 +701,7 @@ class Anonymised:
 
     def report(self) -> str:
         L = [f"Anonymisation report  -  {S._display_path(Path(self.source).name)}", "=" * 78,
-             f"Output: {Path(self.out_dir).name}/   text policy: {self.text_policy}   platform data: {self.ads_policy}   "
+             f"Output: {Path(self.out_dir).name}/   text policy: {self.text_policy}   platform data: {self.ads_policy}   files: {self.files_policy}   "
              f"timestamps: {'shifted by a hidden number of days' if self.shift_days else 'unchanged'}",
              f"People pseudonymised: {self.n_people:,} (you -> 'me'; map in pseudonym_map.csv - keep it private)"]
         for w in self.warnings:
@@ -748,12 +763,16 @@ class Anonymised:
 
 class _Anonymiser:
     def __init__(self, src: S._Source, scan: S.Report, out: Path, text: str, shift_days: int, seed: Optional[str],
-                 ads: str = "keep"):
+                 ads: str = "keep", files: str = "all"):
         self.src, self.scan, self.out, self.text, self.shift, self.ads = src, scan, out, text, shift_days, ads
+        self.files_policy = files
         self.P = Pseudonymizer(scan.people, scan.self_names, seed, network=scan.network)
-        self.res = Anonymised(str(src.path), str(out), text, shift_days, ads_policy=ads, pseudonymizer=self.P)
+        self.res = Anonymised(str(src.path), str(out), text, shift_days, ads_policy=ads, pseudonymizer=self.P,
+                              files_policy=files)
         self.counts = self.res.counts
-        self.drop_types = set(DROP_TYPES) | (PLATFORM_TYPES if ads == "drop" else set())
+        self.drop_types = ({"media_file"} if files == "all" else set(DROP_TYPES)) \
+            | (PLATFORM_TYPES if ads == "drop" else set())
+        self.strict_rels = {fi.rel for fi in scan.files if fi.file_type in STRICT_TYPES}
         self.network_known = bool(scan.network)
         if ads == "keep" and not self.network_known:
             self.res.warnings.append("No followers/following/DM files in this export, so it is impossible to tell "
@@ -955,6 +974,9 @@ class _Anonymiser:
             return self.link(sv, rel)
         # everything else (captions, comments, and any string under a key we do not know) goes
         # through the full pass: pseudonyms for mentions/links/known names, pattern redaction, links
+        if rel in self.strict_rels and sv.strip() and not SAFE_ENUM_RE.fullmatch(sv.strip()):
+            self.counts["values removed (sensitive file, unknown field)"] += 1
+            return "[removed]"
         return self.free_text(sv)
 
     def link(self, url: str, rel: str = "") -> str:
@@ -1095,8 +1117,9 @@ class _Anonymiser:
             if fi.file_type == "identity":
                 if "personal_information.json" in fi.rel_lower or "personal_information.htm" in fi.rel_lower:
                     profile.update(self.profile(data))
-                self.res.dropped.append((fi.rel, fi.file_type))
-                continue
+                if self.files_policy != "all":
+                    self.res.dropped.append((fi.rel, fi.file_type))
+                    continue
             if fi.file_type == "private_messages" and isinstance(data, dict) and "messages" in data:
                 new = self.thread_file(data, fi.rel)
             else:
@@ -1163,12 +1186,14 @@ def _prepare_output_dir(out: Path, source: Path) -> None:
 
 
 def anonymise(source, out_dir="anonymised", text: str = "metadata", shift_days: bool | int = False,
-              seed: Optional[str] = None, rescan: bool = True, ads: str = "keep") -> Anonymised:
+              seed: Optional[str] = None, rescan: bool = True, ads: str = "keep", files: str = "all") -> Anonymised:
     """Anonymise an export folder or .zip into out_dir. Returns an Anonymised result (see .report())."""
     if text not in TEXT_POLICIES:
         raise ValueError(f"text must be one of {TEXT_POLICIES}")
     if ads not in ADS_POLICIES:
         raise ValueError(f"ads must be one of {ADS_POLICIES}")
+    if files not in FILES_POLICIES:
+        raise ValueError(f"files must be one of {FILES_POLICIES}")
     src = S._Source(source)
     scan = S.scan(source)
     if shift_days is True:
@@ -1181,7 +1206,7 @@ def anonymise(source, out_dir="anonymised", text: str = "metadata", shift_days: 
                   "language the scanner does not know), so 'own' would keep nobody's text safely: "
                   "the text policy was changed to 'metadata'")
         text = "metadata"
-    anon = _Anonymiser(src, scan, Path(out_dir), text, shift, seed, ads=ads)
+    anon = _Anonymiser(src, scan, Path(out_dir), text, shift, seed, ads=ads, files=files)
     if forced:
         anon.res.warnings.append(forced)
     res = anon.run()

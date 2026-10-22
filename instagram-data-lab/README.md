@@ -49,9 +49,11 @@ to that page.
 
 ## What the anonymiser does (`ig_anonymise.py`)
 
-- Drops the files the scanner marks DROP (login/IP history, devices, synced contacts,
-  inferred locations, phone/e-mail records, search history, link history, settings) and
-  all media. The identity file becomes a minimal `profile.json`.
+- Keeps every JSON file (`files="all"`, the default) and drops only media. In the sensitive
+  files (identity, login/IP history, devices, synced contacts, inferred locations, phone/e-mail
+  records, payments) only the structure, timestamps and yes/no values survive; every other
+  value is `[removed]` or a pseudonym. `files="minimal"` drops those files instead. A minimal
+  `profile.json` (account age, private flag, follower counts) is written in both modes.
 - Keeps the platform's side (`ads="keep"`, the default; `"drop"` removes it): ads and posts
   shown, videos watched, suggested accounts, inferred interests, advertisers holding the
   student's data, apps/sites reporting to Meta. Business, app and topic names stay; for
