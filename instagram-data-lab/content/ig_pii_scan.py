@@ -117,6 +117,9 @@ FILE_RULES = [
      r"favorite|follow_requests|removed_suggestions|relationships|(^|/)connections/",
      "social_graph", "medium", "PSEUDONYMIZE usernames",
      "Usernames of other people."),
+    (r"past_instagram_insights|organic_insights|audience_insights|content_interactions|profiles_reached|live_videos",
+     "activity_content", "review", "PSEUDONYMIZE usernames, STRIP exif, REVIEW free text",
+     "Your own creator statistics (reach, likes, follows per post/story) with the post captions and EXIF."),
     (r"comments|likes|saved|story_sticker|polls|questions|quizzes|emoji_slider|countdown|reels|posts|stories|"
      r"archived|recently_deleted|profile_photos|(^|/)content/|your_instagram_activity|events|fundraisers|"
      r"shopping|monetization|threads|avatar|notes|(^|/)media/",
