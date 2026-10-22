@@ -160,13 +160,21 @@ def _clean(topic: str, P: Optional[A.Pseudonymizer]) -> str:
 
 
 def available(url: str = DEFAULT_URL, model: Optional[str] = None) -> bool:
-    """Is Ollama reachable (and the model present)?"""
+    """Is Ollama reachable on this computer (and, if given, is the model pulled)? Works from a terminal
+    and from the browser (JupyterLite); from the browser Ollama must have been started with
+    OLLAMA_ORIGINS set to the lab's origin, otherwise this returns False and the lexicon is used."""
     try:
-        tags = _post_json(url.rstrip("/") + "/api/show", {"model": model}) if model else None
         if model:
-            return bool(tags)
-        with urllib.request.urlopen(url.rstrip("/") + "/api/tags", timeout=5) as resp:
-            return resp.status == 200
+            return bool(_post_json(url.rstrip("/") + "/api/show", {"model": model}, timeout=5))
+        try:
+            import js  # type: ignore  # Pyodide: a synchronous GET through the browser
+            xhr = js.XMLHttpRequest.new()
+            xhr.open("GET", url.rstrip("/") + "/api/tags", False)
+            xhr.send()
+            return int(xhr.status) == 200
+        except ImportError:
+            with urllib.request.urlopen(url.rstrip("/") + "/api/tags", timeout=5) as resp:
+                return resp.status == 200
     except Exception:
         return False
 
