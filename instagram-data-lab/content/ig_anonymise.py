@@ -67,7 +67,7 @@ except ImportError:  # notebook opened from another folder
     import ig_pii_scan as S
 
 __version__ = "0.1.0"
-__all__ = ["anonymise", "Anonymised", "TEXT_POLICIES"]
+__all__ = ["anonymise", "Anonymised", "TEXT_POLICIES", "suggest_public", "pack"]
 
 ADS_POLICIES = ("keep", "drop")
 ADS_POLICY_HELP = {
@@ -163,9 +163,14 @@ class Pseudonymizer:
     letters-and-digits skeleton coincide are treated as one person and share a pseudonym.
     """
 
-    def __init__(self, people: dict, self_names: set, seed: Optional[str] = None, network: Optional[set] = None):
+    def __init__(self, people: dict, self_names: set, seed: Optional[str] = None, network: Optional[set] = None,
+                 public: Optional[set] = None):
         self.network = {n.lower() for n in (network or set())}
         self.network_slugs = {_slug(n) for n in self.network if len(_slug(n)) >= MIN_MERGE_SLUG}
+        # accounts declared public by the owner (or detected as businesses): never pseudonymised
+        self.public = {S._fix(n).strip().lower().lstrip("@") for n in (public or set()) if n}
+        self.public_slugs = {_slug(n) for n in self.public if len(_slug(n)) >= MIN_MERGE_SLUG}
+        self.public_seen: set = set()
         self.map: dict = {}           # lower-cased real value -> pseudonym
         self.kind: dict = {}          # lower-cased real value -> username | person_name
         self.display: dict = {}       # lower-cased real value -> original spelling
@@ -207,6 +212,9 @@ class Pseudonymizer:
         k = raw.lower()
         if not k:
             return value
+        if self.is_public(k) and k not in self.self_names:
+            self.public_seen.add(k)
+            return raw
         if k in self.map:
             p = self.map[k]
         else:
@@ -224,6 +232,21 @@ class Pseudonymizer:
             self.display[k] = raw
         self.used.add(p)
         return p
+
+    def is_public(self, value: str) -> bool:
+        """Declared public (PUBLIC_ACCOUNTS) or detected as a business: name stays visible everywhere."""
+        k = S._fix(value).strip().lower().lstrip("@")
+        if not k:
+            return False
+        if k in self.public:
+            return True
+        slug = _slug(k)
+        return len(slug) >= MIN_MERGE_SLUG and slug in self.public_slugs
+
+    def visible(self, value: str) -> bool:
+        """May this author of content you consumed stay visible? Public by declaration, or not in your
+        network (a private account's posts are only visible to followers)."""
+        return self.is_public(value) or not self.in_network(value)
 
     def in_network(self, value: str) -> bool:
         """Is this person you, someone you follow / who follows you, or a DM contact?"""
@@ -535,7 +558,7 @@ def harvest_file(data: Any, rel: str, rows: dict, iso=_iso_utc) -> None:
             rows["follow_requests"].append({"user": u if isinstance(u, str) else "",
                                             "direction": "received" if "received" in name else "sent",
                                             "timestamp": iso(it.get("timestamp") or _old_when(it))})
-    elif "comments" in name:
+    elif "comments" in name and "liked" not in name:
         for it in items:
             text = _smd_by_cat(it, "free_text")
             owner = _smd_by_cat(it, "username", "person_name")
@@ -703,6 +726,7 @@ class Anonymised:
     warnings: list = field(default_factory=list)
     unclassified: list = field(default_factory=list)     # kept files the scanner did not recognise
     kept_visible: set = field(default_factory=set)       # names kept visible on purpose: public accounts, businesses, topics
+    public_accounts: set = field(default_factory=set)    # declared / detected public accounts that occurred
 
     def report(self) -> str:
         L = [f"Anonymisation report  -  {S._display_path(Path(self.source).name)}", "=" * 78,
@@ -735,6 +759,9 @@ class Anonymised:
                 n = self.tables.get(key)
                 if n:
                     L.append(f"  {n:6,d}  {label}")
+        if self.public_accounts:
+            L += ["", f"PUBLIC ACCOUNTS KEPT VISIBLE ({len(self.public_accounts)}: declared in PUBLIC_ACCOUNTS or advertising)"]
+            L.append("  " + ", ".join(sorted(self.public_accounts)))
         L += ["", "TRANSFORMATIONS"]
         for k, n in self.counts.most_common():
             L.append(f"  {n:6,d}  {k}")
@@ -766,12 +793,74 @@ class Anonymised:
 # Core
 # ---------------------------------------------------------------------------
 
+def business_accounts(src: S._Source, scan: S.Report) -> set:
+    """Usernames that advertise on the platform (ad owners and brand partners in ads_viewed / ads_clicked):
+    businesses by construction, so their names may stay visible wherever they occur."""
+    out: set = set()
+    for fi in scan.files:
+        if fi.kind != "json" or fi.error or not re.search(r"(^|/)ads_viewed|(^|/)ads_clicked", fi.rel_lower):
+            continue
+        try:
+            data = json.loads(src.read(fi.rel).decode("utf-8"))
+        except Exception:
+            continue
+        for it in _items_of(data):
+            if not isinstance(it, dict):
+                continue
+            f = lv_fields(it) if "label_values" in it else {}
+            for k, v in f.items():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    u = _by_cat(v[0], "username")
+                    if isinstance(u, str) and u.strip():
+                        out.add(S._fix(u).strip().lower())
+            if not f:
+                u = _smd_by_cat(it, "username")
+                if isinstance(u, str) and u.strip():
+                    out.add(S._fix(u).strip().lower())
+    return out
+
+
+def suggest_public(source, n: int = 40) -> list:
+    """Accounts in your network whose content you liked / saved most often, with how many times:
+    the ones that are public (brands, media, creators) can go into PUBLIC_ACCOUNTS so their names
+    stay visible. Prints real usernames - run it on your own computer only."""
+    src = S._Source(source)
+    scan = S.scan(source)
+    net = {x.lower() for x in scan.network}
+    counts: Counter = Counter()
+    for fi in scan.files:
+        if fi.kind != "json" or fi.error or not re.search(r"liked_posts|saved_posts|story_likes|liked_comments", fi.rel_lower):
+            continue
+        try:
+            data = json.loads(src.read(fi.rel).decode("utf-8"))
+        except Exception:
+            continue
+        for it in _items_of(data):
+            if not isinstance(it, dict):
+                continue
+            if "label_values" in it:
+                u = lv_owner(lv_fields(it))["username"]
+            else:
+                u = _smd_by_cat(it, "username", "person_name") or it.get("title", "")
+            u = S._fix(u).strip().lower() if isinstance(u, str) else ""
+            if u and u in net:
+                counts[u] += 1
+    rows = counts.most_common(n)
+    width = max((len(u) for u, _ in rows), default=10)
+    print(f"{'account (in your network)':{width}}  likes/saves")
+    for u, c in rows:
+        print(f"{u:{width}}  {c}")
+    print("\nCopy the PUBLIC ones (brands, media, creators, institutions) into PUBLIC_ACCOUNTS.")
+    return rows
+
+
 class _Anonymiser:
     def __init__(self, src: S._Source, scan: S.Report, out: Path, text: str, shift_days: int, seed: Optional[str],
-                 ads: str = "keep", files: str = "all"):
+                 ads: str = "keep", files: str = "all", public: Optional[set] = None):
         self.src, self.scan, self.out, self.text, self.shift, self.ads = src, scan, out, text, shift_days, ads
         self.files_policy = files
-        self.P = Pseudonymizer(scan.people, scan.self_names, seed, network=scan.network)
+        self.public = set(public or ()) | (business_accounts(src, scan) if ads == "keep" else set())
+        self.P = Pseudonymizer(scan.people, scan.self_names, seed, network=scan.network, public=self.public)
         self.res = Anonymised(str(src.path), str(out), text, shift_days, ads_policy=ads, pseudonymizer=self.P,
                               files_policy=files)
         self.counts = self.res.counts
@@ -900,7 +989,7 @@ class _Anonymiser:
             return None
         username = S._fix(entries[labels[ukey]].get("value") or "")
         public = bool(username) and self.network_known and bool(CONSUMED_RE.search(rel.lower())) \
-            and not self.P.in_network(username)
+            and self.P.visible(username)
         pseud = self.P(username) if username and not public else None
         out = []
         for e in entries:
@@ -974,7 +1063,7 @@ class _Anonymiser:
             if cat == "username" and CONSUMED_RE.search(low):
                 # content you consumed: a private account's posts are only visible to followers, so an
                 # author outside your network is a public account and may stay visible
-                if self.network_known and not self.P.in_network(sv):
+                if self.network_known and self.P.visible(sv):
                     self.counts["public accounts kept visible (content you consumed)"] += 1
                     self.res.kept_visible.add(sv.strip().lower())
                     return sv
@@ -1008,7 +1097,7 @@ class _Anonymiser:
         if m:
             u = S._ig_user(m)
             if u:
-                if rel and CONSUMED_RE.search(rel.lower()) and self.network_known and not self.P.in_network(u):
+                if rel and CONSUMED_RE.search(rel.lower()) and self.network_known and self.P.visible(u):
                     self.res.kept_visible.add(u.strip().lower())
                     return "https://www.instagram.com/" + u
                 self.counts["profile links pseudonymised"] += 1
@@ -1173,6 +1262,8 @@ class _Anonymiser:
             w.writeheader()
             w.writerows(self.P.rows())
         self.res.n_people = len(self.P.used - {"me"})
+        self.res.public_accounts = set(self.P.public_seen)
+        self.res.kept_visible |= self.P.public_seen
         for note in self.scan.notes:
             if "media files" in note or "folder/zip name" in note:
                 continue  # media are dropped and folder names renamed, so these are handled here
@@ -1207,7 +1298,8 @@ def _prepare_output_dir(out: Path, source: Path) -> None:
 
 
 def anonymise(source, out_dir="anonymised", text: str = "metadata", shift_days: bool | int = False,
-              seed: Optional[str] = None, rescan: bool = True, ads: str = "keep", files: str = "all") -> Anonymised:
+              seed: Optional[str] = None, rescan: bool = True, ads: str = "keep", files: str = "all",
+              public=()) -> Anonymised:
     """Anonymise an export folder or .zip into out_dir. Returns an Anonymised result (see .report())."""
     if text not in TEXT_POLICIES:
         raise ValueError(f"text must be one of {TEXT_POLICIES}")
@@ -1227,7 +1319,8 @@ def anonymise(source, out_dir="anonymised", text: str = "metadata", shift_days: 
                   "language the scanner does not know), so 'own' would keep nobody's text safely: "
                   "the text policy was changed to 'metadata'")
         text = "metadata"
-    anon = _Anonymiser(src, scan, Path(out_dir), text, shift, seed, ads=ads, files=files)
+    anon = _Anonymiser(src, scan, Path(out_dir), text, shift, seed, ads=ads, files=files,
+                       public={str(u).strip().lstrip("@").lower() for u in (public or ()) if str(u).strip()})
     if forced:
         anon.res.warnings.append(forced)
     res = anon.run()
